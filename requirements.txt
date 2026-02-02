@@ -1,0 +1,9 @@
+streamlit
+pandas
+plotly
+openpyxl
+plotly-express
+datetime
+typing
+json
+sqlite3
