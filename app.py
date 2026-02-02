@@ -13,7 +13,7 @@ from db import (
 from auth import hash_password, verify_password
 from ics_utils import task_to_ics_event, tasks_to_ics_calendar
 
-st.set_page_config(page_title="Workflow Team Manager", layout="wide")
+st.set_page_config(page_title="Workflow Organización de equipo", layout="wide")
 init_db()
 
 # -------------------- Helpers: pickle-safe for Streamlit widgets --------------------
@@ -682,7 +682,7 @@ if not st.session_state["active_group_id"]:
 GROUP_ID = st.session_state["active_group_id"]
 
 # -------------------- Header & Notifications --------------------
-st.title("Workflow Team Manager")
+st.title("Workflow Organización de Equipo")
 
 with connect() as con:
     unread = con.execute("""
@@ -702,7 +702,7 @@ if menu == "Resumen":
     with connect() as con:
         uid = st.session_state["user_id"]
 
-        st.subheader("Resumen de trabajo (claridad de qué hay por hacer)")
+        st.subheader("Resumen de trabajo (qué hay por hacer)")
 
         def fetch_by_role(role: str):
             rows = con.execute("""
@@ -737,7 +737,7 @@ if menu == "Resumen":
             st.dataframe(pd.DataFrame(I) if I else pd.DataFrame(), use_container_width=True, height=220)
 
         st.divider()
-        st.subheader("Riesgos y control (gobernanza)")
+        st.subheader("Riesgos y control")
 
         overdue = rows_to_dicts(con.execute("""
           SELECT t.id, t.title, t.due_date, t.status, p.name as project
@@ -764,7 +764,7 @@ if menu == "Resumen":
             st.dataframe(pd.DataFrame(blocked) if blocked else pd.DataFrame(),
                          use_container_width=True, height=260)
         st.divider()
-        st.subheader("KPIs por persona (ejecución real y control)")
+        st.subheader("KPIs por persona")
 
         with connect() as con:
             # filtro por proyecto (opcional)
@@ -1541,7 +1541,7 @@ elif menu == "Tarea (detalle)":
 
         # Editar responsabilidades
         st.divider()
-        st.subheader("Editar responsabilidades (vista amigable + pestaña matriz)")
+        st.subheader("Editar responsabilidades")
         if has_permission(con, group_id, uid, "task_change_raci"):
             members = rows_to_dicts(con.execute("""
               SELECT u.id, u.full_name, u.username
@@ -1781,7 +1781,7 @@ elif menu == "Gobernanza":
             st.rerun()
 
         st.divider()
-        st.markdown("### Reglas recomendadas (adopción)")
+        st.markdown("### Reglas recomendadas")
         st.write("- Toda tarea debe tener DoD (criterio de aceptación).")
         st.write("- Si requiere aprobación: no se cierra sin decisión del Dueño.")
         st.write("- Blocked requiere motivo y dueño de desbloqueo.")
@@ -1884,6 +1884,8 @@ Esta herramienta organiza proyectos y tareas por grupo, con control de responsab
 **Blocked**: bloqueada (requiere motivo + responsable de desbloqueo).
 
 **Approval workflow**: flujo de aprobación. Si una tarea requiere aprobación, pasa a “awaiting_approval” antes de “done”.
+                
+**Kanban**: Principios y prácticas de control y de manejo para mejorar el flujo de trabajo y sus riesgos, cambios progresivos y WIP.
 
 ---
 
@@ -1896,9 +1898,9 @@ Esta herramienta organiza proyectos y tareas por grupo, con control de responsab
 
 ---
 
-## Uso recomendado (para adopción real)
+## Uso recomendado
 - Revisión semanal obligatoria (panel Resumen).
-- WIP bajo (2–3) por persona.
+- WIP bajo (2–3) por persona, puede variar.
 - Blocked siempre con motivo y responsable.
 - DoD siempre (aunque sea corto).
 """)
