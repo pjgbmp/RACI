@@ -1,9 +1,5 @@
-streamlit
-pandas
-plotly
-openpyxl
-datetime
-typing
-json
-sqlite3
-
+streamlit>=1.30
+pandas>=2.2
+plotly>=5.20
+openpyxl>=3.1
+bcrypt>=4.1
