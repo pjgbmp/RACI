@@ -8,7 +8,7 @@ import plotly.express as px
 from datetime import date, datetime, timedelta
 import json
 
-from auth import hash_password, verify_password
+from auth_supabase import sign_in, sign_out, admin_create_user
 from ics_utils import task_to_ics_event, tasks_to_ics_calendar
 
 #  Nuevo db.py (Ruta 1)
@@ -470,62 +470,73 @@ def approvals_kpi_by_accountable(group_id: int, project_id: int | None = None) -
 # =============================================================================
 # Auth (user_profiles)
 # =============================================================================
+
 st.sidebar.title("Acceso")
 
 if not logged_in():
-    tabs = st.sidebar.tabs(["Login", "Crear usuario"])
+    tabs = st.sidebar.tabs(["Login", "Crear usuario (admin)"])
+
     with tabs[0]:
-        u = st.text_input("Usuario")
+        email = st.text_input("Email")
         p = st.text_input("Contraseña", type="password")
         if st.button("Entrar"):
-            prof = get_user_profile_by_username(u.strip())
-            # ⚠️ Requiere columna password_hash en user_profiles
-            if not prof or not prof.get("password_hash") or not verify_password(p, prof["password_hash"]):
-                st.error("Credenciales inválidas.")
-            else:
-                st.session_state["user_id"] = prof["user_id"]
+            try:
+                res = sign_in(email.strip(), p)
+                user = res.user
+                if not user:
+                    st.error("No se pudo iniciar sesión.")
+                    st.stop()
+
+                # user.id viene de auth.users(id)
+                prof = get_user_profile(user.id)
+
+                # Si por alguna razón no existe perfil, lo creamos mínimo
+                if not prof:
+                    upsert_user_profile(user.id, full_name=email.strip(), username=None, email=email.strip(), is_active=True)
+                    prof = get_user_profile(user.id)
+
+                st.session_state["user_id"] = user.id
                 st.session_state["username"] = prof.get("username") or ""
                 st.session_state["full_name"] = prof.get("full_name") or ""
                 st.rerun()
+            except Exception as e:
+                st.error(f"Login falló: {e}")
 
     with tabs[1]:
-        nu = st.text_input("Nuevo usuario", key="nu")
-        npw = st.text_input("Nueva contraseña", type="password", key="npw")
-        fn = st.text_input("Nombre completo", key="fn")
-        email = st.text_input("Email (opcional)")
-        if st.button("Crear"):
-            if not (nu.strip() and npw and fn.strip()):
-                st.error("Completa usuario, contraseña y nombre.")
-            else:
-                # validar que no exista
-                existing = get_user_profile_by_username(nu.strip())
-                if existing:
-                    st.error("Ese usuario ya existe.")
-                else:
-                    uid = str(uuidlib.uuid4())
-                    # creamos perfil (y guardamos password_hash)
-                    conn = get_conn()
-                    conn.table("user_profiles").insert({
-                        "user_id": uid,
-                        "username": nu.strip(),
-                        "full_name": fn.strip(),
-                        "email": (email.strip() or None),
-                        "is_active": True,
-                        "password_hash": hash_password(npw),
-                        "created_at": now_iso(),
-                    }).execute()
-                    st.success("Usuario creado. Inicia sesión.")
-    st.stop()
+        st.caption("Solo para administradores (ver sección 'Cómo ser admin').")
+        new_email = st.text_input("Email nuevo", key="new_email")
+        npw = st.text_input("Contraseña temporal", type="password", key="new_pw")
+        fn = st.text_input("Nombre completo", key="new_fn")
+        nu = st.text_input("Username (opcional)", key="new_un")
 
+        if st.button("Crear usuario"):
+            # aquí luego amarramos “solo admin”, por ahora lo dejamos funcional
+            if not (new_email.strip() and npw and fn.strip()):
+                st.error("Completa email, contraseña y nombre.")
+            else:
+                # 1) Crear usuario en Auth con email_confirm=True
+                created = admin_create_user(new_email.strip(), npw, email_confirm=True)
+                uid = created.user.id
+
+                # 2) Crear perfil usando el mismo uid
+                upsert_user_profile(
+                    user_id=uid,
+                    full_name=fn.strip(),
+                    username=(nu.strip() or None),
+                    email=new_email.strip(),
+                    is_active=True,
+                )
+                st.success("Usuario creado en Supabase Auth y perfil creado. Ya puede iniciar sesión.")
+    st.stop()
 
 # Logged in
 st.sidebar.success(st.session_state.get("full_name", "Usuario"))
 if st.sidebar.button("Cerrar sesión"):
+    sign_out()
     for k in ["user_id", "username", "full_name", "active_group_id", "selected_task_id"]:
         st.session_state[k] = None if k in ["user_id", "active_group_id", "selected_task_id"] else ""
     st.session_state["menu"] = "Resumen"
     st.rerun()
-
 
 # =============================================================================
 # Grupo: selección / creación / join
