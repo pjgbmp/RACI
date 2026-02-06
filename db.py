@@ -71,6 +71,13 @@ def _supabase_url_key() -> tuple[str, str]:
 # ----------------------------
 # Supabase client (anon + user session)
 # ----------------------------
+def get_conn():
+    """
+    Compatibilidad con app.py:
+    devuelve un cliente supabase-py actuando como el usuario logueado (RLS aplica).
+    """
+    return sb_user()
+
 @st.cache_resource
 def sb_anon():
     """
