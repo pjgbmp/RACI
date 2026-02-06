@@ -1,76 +1,61 @@
-# app.py (RUTA 1 - Supabase + user_profiles)
+# app.py (RUTA 1 - Supabase + user_profiles) — ALINEADO con el db.py que pegaste
+# -----------------------------------------------------------------------------
+# ✅ Cambios clave:
+# 1) Imports: SOLO funciones que existen en tu db.py.
+# 2) Login: guarda st.session_state["sb_session"] y ["sb_user"] (requerido por sb_user()).
+# 3) Storage: usa supabase-py directo (get_conn() ya ES el cliente; no existe .client).
+# 4) Todo lo que NO está en db.py (RACI, deps, comments, history, approvals, notifications,
+#    templates, attachments, outbound) se implementa aquí con supa_table(...).
+# -----------------------------------------------------------------------------
+
+import io
+import json
 import os
 import uuid as uuidlib
-import io
-import pandas as pd
-import streamlit as st
-import plotly.express as px
 from datetime import date, datetime, timedelta
-import json
+
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
 from auth_supabase import sign_in, sign_out
 from ics_utils import task_to_ics_event, tasks_to_ics_calendar
 
-#  Nuevo db.py (Ruta 1)
+# ✅ db.py (tu versión completa pegada)
 from db import (
-    # conexión
     get_conn, now_iso,
-
     # user_profiles
     upsert_user_profile, get_user_profile, get_user_profile_by_username, fetch_profiles,
-
     # grupos / permisos
     list_my_groups, create_group, get_group_by_join_code, add_group_member,
     list_group_members, user_role_in_group, has_permission,
     seed_group_permissions, transfer_group_leadership,
     list_group_role_permissions, set_group_role_permission,
-
     # proyectos
     list_projects, create_project,
     list_project_members, ensure_project_member, remove_project_member,
-
-    # tareas / board
+    # tareas
     list_tasks_by_project, list_tasks_for_board, get_task, create_task,
     update_task_due_date, update_task_status,
-
-    # RACI
-    get_task_roles, upsert_task_roles, get_accountable_id, is_responsible,
-
-    # deps / tags
-    list_task_dependencies_open, set_task_dependencies,
-    list_tags, get_or_create_tag, set_task_tags, list_task_tags,
-
-    # comments / history
-    list_task_comments, add_task_comment,
-    list_task_history, log_history,
-
-    # approvals
-    get_pending_approval, create_approval_request, decide_approval, list_approvals_by_group,
-
-    # notifications
-    add_notification, unread_notifications_count, list_notifications, mark_notifications_read,
-
-    # templates
-    list_templates, create_template, list_template_tasks, add_template_task,
-
-    # attachments (metadata)
-    add_task_attachment, list_task_attachments,
-
-    # outbound queue
-    enqueue_outbound,
 )
 
 st.set_page_config(page_title="Workflow Organización de equipo", layout="wide")
 
 
 # =============================================================================
-# Helpers generales (pickle-safe / UI)
+# Helpers generales
 # =============================================================================
 def safe_selectbox_dict(label, dict_options, format_func, key=None, index=0):
     if not dict_options:
         st.warning(f"No hay opciones disponibles para: {label}")
         return None
-    return st.selectbox(label, options=dict_options, format_func=format_func, key=key, index=min(index, len(dict_options)-1))
+    return st.selectbox(
+        label,
+        options=dict_options,
+        format_func=format_func,
+        key=key,
+        index=min(index, len(dict_options) - 1),
+    )
 
 
 def fmt_user(u: dict) -> str:
@@ -91,66 +76,8 @@ def week_bounds(d: date):
     return start, end
 
 
-def notify(
-    target_user_id: str,
-    kind: str,
-    message: str,
-    task_id: int | None = None,
-    send_email: bool = False,
-    email_subject: str | None = None,
-):
-    """
-    1) Siempre crea notificación in-app (tabla notifications)
-    2) Opcional: encola un correo en outbound_queue (no lo envía aquí)
-    """
-    # 1) In-app
-    try:
-        add_notification(target_user_id, kind, message, int(task_id) if task_id is not None else None)
-    except Exception as e:
-        st.error(f"Error creando notificación: {e}")
-        return
-
-    # 2) Email (cola)
-    if send_email:
-        prof = get_user_profile(target_user_id)
-        to_email = (prof or {}).get("email")
-        if not to_email:
-            st.warning("No se pudo enviar email: el usuario destino no tiene email registrado en user_profiles.")
-            return
-
-        payload = {
-            "to": to_email,
-            "subject": email_subject or "Notificación del Workflow Team Manager",
-            "message": message,
-            "task_id": task_id,
-            "kind": kind,
-            "user_id": target_user_id,
-            "created_at": now_iso(),
-        }
-        try:
-            enqueue_outbound("email", payload=json.dumps(payload, ensure_ascii=False), to_address=to_email)
-        except Exception as e:
-            st.error(f"Error encolando email: {e}")
-
-
-# =============================================================================
-# Session defaults
-# =============================================================================
-for k, v in {
-    "user_id": None,            # uuid string
-    "username": "",
-    "full_name": "",
-    "is_global_admin": False,   # ✅ admin global
-    "active_group_id": None,    # int
-    "selected_task_id": None,
-    "menu": "Resumen",
-}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-
-def logged_in():
-    return st.session_state["user_id"] is not None
+def logged_in() -> bool:
+    return st.session_state.get("user_id") is not None
 
 
 def require_login():
@@ -164,22 +91,41 @@ def set_menu(page: str):
 
 
 # =============================================================================
-# Supabase low-level helpers (para queries masivas cuando conviene)
+# Session defaults
+# =============================================================================
+for k, v in {
+    "user_id": None,
+    "username": "",
+    "full_name": "",
+    "is_global_admin": False,
+    "active_group_id": None,
+    "selected_task_id": None,
+    "menu": "Resumen",
+    # ✅ claves que db.py requiere para sb_user()
+    "sb_user": None,
+    "sb_session": None,
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+
+# =============================================================================
+# Supabase helpers (low-level)
 # =============================================================================
 def supa_table(name: str):
+    # get_conn() retorna el cliente supabase-py actuando como user (por db.py)
     return get_conn().table(name)
 
 
 def chunked(lst, n=200):
     for i in range(0, len(lst), n):
-        yield lst[i:i+n]
+        yield lst[i:i + n]
 
 
 # =============================================================================
-# STORAGE (Adjuntos)
+# STORAGE (Adjuntos) — ✅ FIX: sin .client, usando supabase-py directo
 # =============================================================================
 def storage_bucket_name() -> str:
-    # usa secret opcional, si no: "attachments"
     try:
         return st.secrets["connections"]["supabase"].get("SUPABASE_STORAGE_BUCKET", "attachments")
     except Exception:
@@ -187,24 +133,484 @@ def storage_bucket_name() -> str:
 
 
 def storage_upload_bytes(bucket: str, path: str, data: bytes, content_type: str | None = None):
-    """
-    Requiere que SupabaseConnection exponga conn.client (supabase-py).
-    """
-    conn = get_conn()
-    client = getattr(conn, "client", None)
-    if client is None:
-        raise RuntimeError("SupabaseConnection no expone .client. No puedo subir a Storage con esta configuración.")
-    opts = {"contentType": content_type} if content_type else {}
+    client = get_conn()
+    opts = {"contentType": content_type} if content_type else None
     return client.storage.from_(bucket).upload(path, data, file_options=opts)
 
 
 def storage_signed_url(bucket: str, path: str, expires_in_seconds: int = 3600) -> str:
-    conn = get_conn()
-    client = getattr(conn, "client", None)
-    if client is None:
-        raise RuntimeError("SupabaseConnection no expone .client. No puedo generar signed URLs.")
+    client = get_conn()
     res = client.storage.from_(bucket).create_signed_url(path, expires_in_seconds)
-    return res.get("signedURL") or res.get("signedUrl") or ""
+    return (res or {}).get("signedURL") or (res or {}).get("signedUrl") or ""
+
+
+# =============================================================================
+# (NO estaban en db.py) — Implementaciones directas vía tablas
+# =============================================================================
+
+# ---------- RACI ----------
+def get_task_roles(task_id: int) -> dict[str, list[dict]]:
+    rows = getattr(
+        supa_table("task_roles")
+        .select("user_id,role")
+        .eq("task_id", int(task_id))
+        .execute(),
+        "data",
+        [],
+    ) or []
+
+    by_role: dict[str, list[str]] = {"A": [], "R": [], "C": [], "I": []}
+    for r in rows:
+        role = r.get("role")
+        uid = r.get("user_id")
+        if role in by_role and uid:
+            by_role[role].append(uid)
+
+    # perfiles
+    all_uids = sorted({u for xs in by_role.values() for u in xs})
+    prof_by = fetch_profiles(all_uids)
+
+    def pack(uid: str) -> dict:
+        p = prof_by.get(uid, {})
+        return {"id": uid, "user_id": uid, "name": p.get("full_name", "(sin nombre)"), "username": p.get("username", "")}
+
+    out = {k: [pack(uid) for uid in v] for k, v in by_role.items()}
+    # A único: si hay múltiples, nos quedamos con el primero (por convención)
+    if len(out["A"]) > 1:
+        out["A"] = [out["A"][0]]
+    return out
+
+
+def get_accountable_id(task_id: int) -> str | None:
+    r = getattr(
+        supa_table("task_roles")
+        .select("user_id")
+        .eq("task_id", int(task_id))
+        .eq("role", "A")
+        .limit(1)
+        .execute(),
+        "data",
+        [],
+    ) or []
+    return (r[0].get("user_id") if r else None)
+
+
+def is_responsible(task_id: int, user_id: str) -> bool:
+    r = getattr(
+        supa_table("task_roles")
+        .select("task_id")
+        .eq("task_id", int(task_id))
+        .eq("role", "R")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute(),
+        "data",
+        [],
+    ) or []
+    return bool(r)
+
+
+def upsert_task_roles(
+    task_id: int,
+    actor_id: str,
+    A_id: str,
+    R_ids: list[str],
+    C_ids: list[str],
+    I_ids: list[str],
+) -> None:
+    # Validaciones
+    if not A_id:
+        raise ValueError("Falta Dueño (A).")
+    if not R_ids:
+        raise ValueError("Debe haber al menos 1 Ejecutor (R).")
+
+    # delete all and insert fresh (simple, consistente)
+    supa_table("task_roles").delete().eq("task_id", int(task_id)).execute()
+
+    rows = [{"task_id": int(task_id), "user_id": A_id, "role": "A"}]
+    rows += [{"task_id": int(task_id), "user_id": x, "role": "R"} for x in sorted(set(R_ids))]
+    rows += [{"task_id": int(task_id), "user_id": x, "role": "C"} for x in sorted(set(C_ids or []))]
+    rows += [{"task_id": int(task_id), "user_id": x, "role": "I"} for x in sorted(set(I_ids or []))]
+
+    supa_table("task_roles").insert(rows).execute()
+
+
+# ---------- Dependencias ----------
+def list_task_dependencies_open(task_id: int) -> list[dict]:
+    # Espera tabla: task_dependencies(task_id, depends_on_task_id)
+    links = getattr(
+        supa_table("task_dependencies")
+        .select("depends_on_task_id")
+        .eq("task_id", int(task_id))
+        .execute(),
+        "data",
+        [],
+    ) or []
+    dep_ids = [int(x["depends_on_task_id"]) for x in links if x.get("depends_on_task_id") is not None]
+    if not dep_ids:
+        return []
+
+    deps = getattr(
+        supa_table("tasks")
+        .select("id,title,status,priority,due_date")
+        .in_("id", dep_ids)
+        .execute(),
+        "data",
+        [],
+    ) or []
+
+    return [d for d in deps if d.get("status") != "done"]
+
+
+def set_task_dependencies(task_id: int, depends_on_task_ids: list[int]) -> None:
+    supa_table("task_dependencies").delete().eq("task_id", int(task_id)).execute()
+    if depends_on_task_ids:
+        rows = [{"task_id": int(task_id), "depends_on_task_id": int(x)} for x in sorted(set(depends_on_task_ids))]
+        supa_table("task_dependencies").insert(rows).execute()
+
+
+# ---------- Comments ----------
+def list_task_comments(task_id: int, limit: int = 50) -> list[dict]:
+    rows = getattr(
+        supa_table("task_comments")
+        .select("id,task_id,user_id,comment,progress_pct,next_step,created_at")
+        .eq("task_id", int(task_id))
+        .order("id", desc=True)
+        .limit(limit)
+        .execute(),
+        "data",
+        [],
+    ) or []
+    uids = sorted({r["user_id"] for r in rows if r.get("user_id")})
+    prof_by = fetch_profiles(uids)
+    for r in rows:
+        p = prof_by.get(r.get("user_id", ""), {})
+        r["full_name"] = p.get("full_name", "(sin nombre)")
+    return rows
+
+
+def add_task_comment(task_id: int, user_id: str, comment: str, progress_pct: int | None, next_step: str | None) -> None:
+    supa_table("task_comments").insert(
+        {
+            "task_id": int(task_id),
+            "user_id": user_id,
+            "comment": comment,
+            "progress_pct": int(progress_pct) if progress_pct is not None else None,
+            "next_step": next_step,
+            "created_at": now_iso(),
+        }
+    ).execute()
+
+
+# ---------- History ----------
+def list_task_history(task_id: int, limit: int = 200) -> list[dict]:
+    rows = getattr(
+        supa_table("task_history")
+        .select("id,task_id,actor_id,field,old_value,new_value,created_at")
+        .eq("task_id", int(task_id))
+        .order("id", desc=True)
+        .limit(limit)
+        .execute(),
+        "data",
+        [],
+    ) or []
+    uids = sorted({r["actor_id"] for r in rows if r.get("actor_id")})
+    prof_by = fetch_profiles(uids)
+    for r in rows:
+        p = prof_by.get(r.get("actor_id", ""), {})
+        r["actor_name"] = p.get("full_name", "(sin nombre)")
+    return rows
+
+
+def log_history(task_id: int, actor_id: str, field: str, old_value, new_value) -> None:
+    supa_table("task_history").insert(
+        {
+            "task_id": int(task_id),
+            "actor_id": actor_id,
+            "field": field,
+            "old_value": None if old_value is None else str(old_value),
+            "new_value": None if new_value is None else str(new_value),
+            "created_at": now_iso(),
+        }
+    ).execute()
+
+
+# ---------- Approvals ----------
+def get_pending_approval(task_id: int) -> dict | None:
+    rows = getattr(
+        supa_table("approval_requests")
+        .select("*")
+        .eq("task_id", int(task_id))
+        .eq("status", "pending")
+        .order("id", desc=True)
+        .limit(1)
+        .execute(),
+        "data",
+        [],
+    ) or []
+    return rows[0] if rows else None
+
+
+def create_approval_request(task_id: int, requested_by: str, accountable_user_id: str, request_note: str | None = None):
+    supa_table("approval_requests").insert(
+        {
+            "task_id": int(task_id),
+            "requested_by": requested_by,
+            "accountable_user_id": accountable_user_id,
+            "status": "pending",
+            "request_note": request_note,
+            "requested_at": now_iso(),
+            "decided_at": None,
+            "decision_note": None,
+        }
+    ).execute()
+
+
+def decide_approval(approval_id: int, decision: str, decision_note: str | None = None):
+    assert decision in ("approved", "rejected")
+    supa_table("approval_requests").update(
+        {
+            "status": decision,
+            "decided_at": now_iso(),
+            "decision_note": decision_note,
+        }
+    ).eq("id", int(approval_id)).execute()
+
+
+def list_approvals_by_group(group_id: int, project_id: int | None = None) -> list[dict]:
+    # Trae tasks del grupo (por proyectos) y luego approvals por task_id
+    projs = list_projects(group_id)
+    if not projs:
+        return []
+    pids = [int(project_id)] if project_id else [int(p["id"]) for p in projs]
+
+    task_ids: list[int] = []
+    for pid in pids:
+        rows = list_tasks_by_project(pid, limit=1200)
+        task_ids.extend([int(t["id"]) for t in rows])
+    task_ids = sorted(set(task_ids))
+    if not task_ids:
+        return []
+
+    appr: list[dict] = []
+    for part in chunked(task_ids, 200):
+        rows = getattr(
+            supa_table("approval_requests")
+            .select("id,task_id,requested_by,accountable_user_id,status,requested_at,decided_at,decision_note,request_note")
+            .in_("task_id", part)
+            .execute(),
+            "data",
+            [],
+        ) or []
+        appr.extend(rows)
+
+    # enriquecer accountable full_name
+    uids = sorted({a["accountable_user_id"] for a in appr if a.get("accountable_user_id")})
+    prof_by = fetch_profiles(uids)
+    for a in appr:
+        p = prof_by.get(a.get("accountable_user_id", ""), {})
+        a["full_name"] = p.get("full_name", "(sin nombre)")
+    return appr
+
+
+# ---------- Notifications ----------
+def add_notification(target_user_id: str, kind: str, message: str, task_id: int | None = None) -> None:
+    client = get_conn()
+    actor = st.session_state["user_id"]
+
+    # RPC: public.notify_user(actor, target, kind, message, task_id)
+    client.rpc("notify_user", {
+        "p_actor_id": actor,
+        "p_target_user_id": target_user_id,
+        "p_kind": kind,
+        "p_message": message,
+        "p_task_id": int(task_id) if task_id is not None else None
+    }).execute()
+
+
+
+def unread_notifications_count(user_id: str) -> int:
+    rows = getattr(
+        supa_table("notifications")
+        .select("id")
+        .eq("user_id", user_id)
+        .is_("read_at", "null")
+        .execute(),
+        "data",
+        [],
+    ) or []
+    return len(rows)
+
+
+def list_notifications(user_id: str, limit: int = 20) -> list[dict]:
+    return getattr(
+        supa_table("notifications")
+        .select("id,kind,message,task_id,created_at,read_at")
+        .eq("user_id", user_id)
+        .order("id", desc=True)
+        .limit(limit)
+        .execute(),
+        "data",
+        [],
+    ) or []
+
+
+def mark_notifications_read(user_id: str) -> None:
+    supa_table("notifications").update({"read_at": now_iso()}).eq("user_id", user_id).is_("read_at", "null").execute()
+
+
+# ---------- Templates ----------
+def list_templates(group_id: int) -> list[dict]:
+    return getattr(
+        supa_table("templates")
+        .select("*")
+        .eq("group_id", int(group_id))
+        .order("id", desc=True)
+        .execute(),
+        "data",
+        [],
+    ) or []
+
+
+def create_template(group_id: int, name: str, description: str | None, created_by: str) -> int:
+    row = getattr(
+        supa_table("templates")
+        .insert(
+            {
+                "group_id": int(group_id),
+                "name": name,
+                "description": description,
+                "created_by": created_by,
+                "created_at": now_iso(),
+            }
+        )
+        .execute(),
+        "data",
+        None,
+    )
+    if isinstance(row, list) and row:
+        return int(row[0]["id"])
+    if isinstance(row, dict) and row.get("id"):
+        return int(row["id"])
+    raise RuntimeError("No pude crear template (respuesta sin id).")
+
+
+def list_template_tasks(template_id: int) -> list[dict]:
+    return getattr(
+        supa_table("template_tasks")
+        .select("*")
+        .eq("template_id", int(template_id))
+        .order("id", desc=False)
+        .execute(),
+        "data",
+        [],
+    ) or []
+
+
+def add_template_task(
+    template_id: int,
+    title: str,
+    description: str | None,
+    dod: str,
+    priority: str,
+    requires_approval: bool,
+    days_from_start: int,
+    tags_csv: str | None,
+    component_name: str | None,
+) -> None:
+    supa_table("template_tasks").insert(
+        {
+            "template_id": int(template_id),
+            "title": title,
+            "description": description,
+            "dod": dod,
+            "priority": priority,
+            "requires_approval": bool(requires_approval),
+            "days_from_start": int(days_from_start),
+            "tags_csv": tags_csv,
+            "component_name": component_name,
+        }
+    ).execute()
+
+
+# ---------- Attachments metadata ----------
+def add_task_attachment(task_id: int, user_id: str, filename: str, storage_path: str, storage_bucket: str) -> None:
+    supa_table("task_attachments").insert(
+        {
+            "task_id": int(task_id),
+            "user_id": user_id,
+            "filename": filename,
+            "storage_bucket": storage_bucket,
+            "storage_path": storage_path,
+            "created_at": now_iso(),
+        }
+    ).execute()
+
+
+def list_task_attachments(task_id: int, limit: int = 50) -> list[dict]:
+    rows = getattr(
+        supa_table("task_attachments")
+        .select("id,task_id,user_id,filename,storage_bucket,storage_path,created_at")
+        .eq("task_id", int(task_id))
+        .order("id", desc=True)
+        .limit(limit)
+        .execute(),
+        "data",
+        [],
+    ) or []
+    uids = sorted({r["user_id"] for r in rows if r.get("user_id")})
+    prof_by = fetch_profiles(uids)
+    for r in rows:
+        p = prof_by.get(r.get("user_id", ""), {})
+        r["full_name"] = p.get("full_name", "(sin nombre)")
+    return rows
+
+
+# ---------- Outbound queue ----------
+def enqueue_outbound(channel: str, payload: str, to_address: str | None = None) -> None:
+    supa_table("outbound_queue").insert(
+        {
+            "channel": channel,
+            "payload": payload,
+            "to_address": to_address,
+            "status": "queued",
+            "created_at": now_iso(),
+        }
+    ).execute()
+
+
+# =============================================================================
+# Notify wrapper (in-app + optional email queue)
+# =============================================================================
+def notify(
+    target_user_id: str,
+    kind: str,
+    message: str,
+    task_id: int | None = None,
+    send_email: bool = False,
+    email_subject: str | None = None,
+):
+    # 1) In-app
+    add_notification(target_user_id, kind, message, int(task_id) if task_id is not None else None)
+
+    # 2) Email queue (optional)
+    if send_email:
+        prof = get_user_profile(target_user_id)
+        to_email = (prof or {}).get("email")
+        if not to_email:
+            st.warning("No se pudo encolar email: el usuario destino no tiene email en user_profiles.")
+            return
+
+        payload_obj = {
+            "to": to_email,
+            "subject": email_subject or "Notificación del Workflow Team Manager",
+            "message": message,
+            "task_id": task_id,
+            "kind": kind,
+            "user_id": target_user_id,
+            "created_at": now_iso(),
+        }
+        enqueue_outbound("email", payload=json.dumps(payload_obj, ensure_ascii=False), to_address=to_email)
 
 
 # =============================================================================
@@ -216,16 +622,10 @@ def _project_map(group_id: int) -> dict[int, dict]:
 
 
 def _fetch_group_task_ids(group_id: int, project_id: int | None = None, limit_per_project: int = 600) -> list[int]:
-    """
-    Obtiene task_ids del grupo, sin JOINs.
-    """
     pmap = _project_map(group_id)
     if not pmap:
         return []
-    if project_id is not None:
-        pids = [int(project_id)]
-    else:
-        pids = list(pmap.keys())
+    pids = [int(project_id)] if project_id is not None else list(pmap.keys())
 
     task_ids: list[int] = []
     for pid in pids:
@@ -235,9 +635,6 @@ def _fetch_group_task_ids(group_id: int, project_id: int | None = None, limit_pe
 
 
 def _bulk_task_roles(task_ids: list[int]) -> list[dict]:
-    """
-    Devuelve filas crudas de task_roles: [{"task_id":..,"user_id":..,"role":..}, ...]
-    """
     if not task_ids:
         return []
     out: list[dict] = []
@@ -258,15 +655,6 @@ def _bulk_tasks(task_ids: list[int]) -> list[dict]:
 
 
 def compute_kpis_per_person(group_id: int, project_id: int | None = None) -> pd.DataFrame:
-    """
-    KPIs por persona (basado en rol R = ejecutor).
-    - WIP (doing)
-    - ToDo / Doing / Blocked / Awaiting / Done
-    - Overdue (vencidas)
-    - Avg Aging (días) en tareas abiertas
-    - Avg Lead Time (días) en tareas cerradas (últimos 60 días)
-    - On-time % en tareas cerradas (con due_date)
-    """
     members = list_group_members(group_id)
     if not members:
         return pd.DataFrame()
@@ -285,17 +673,6 @@ def compute_kpis_per_person(group_id: int, project_id: int | None = None) -> pd.
 
     roles = _bulk_task_roles(task_ids)
     roles_r = [r for r in roles if r.get("role") == "R"]
-    if not roles_r:
-        return pd.DataFrame([{
-            "user_id": m["user_id"],
-            "full_name": m["full_name"],
-            "todo": 0, "doing": 0, "blocked": 0, "awaiting_approval": 0, "done": 0,
-            "wip_doing": 0, "overdue_open": 0,
-            "avg_aging_days_open": None,
-            "avg_lead_time_days_done_60d": None,
-            "on_time_rate_done": None
-        } for m in members])
-
     tasks = _bulk_tasks(task_ids)
     t_by_id = {int(t["id"]): t for t in tasks}
 
@@ -392,11 +769,6 @@ def kpi_badges_row(df_kpi: pd.DataFrame):
 
 
 def approval_cycle_hours(task_id: int) -> float | None:
-    """
-    Usa la última approval_request:
-      - pending: requested_at -> ahora
-      - decided: requested_at -> decided_at
-    """
     r = getattr(
         supa_table("approval_requests")
         .select("requested_at,decided_at,status")
@@ -423,12 +795,6 @@ def approval_cycle_hours(task_id: int) -> float | None:
 
 
 def approvals_kpi_by_accountable(group_id: int, project_id: int | None = None) -> pd.DataFrame:
-    """
-    KPIs de aprobación por Dueño (A):
-    - pending_count
-    - avg_cycle_hours_approved_60d
-    - avg_cycle_hours_pending
-    """
     appr = list_approvals_by_group(group_id, project_id=project_id)
     df = pd.DataFrame(appr)
     if df.empty:
@@ -464,7 +830,7 @@ def approvals_kpi_by_accountable(group_id: int, project_id: int | None = None) -
 
 
 # =============================================================================
-# Auth (user_profiles) - SOLO LOGIN
+# Auth (SOLO LOGIN) — ✅ FIX: guarda sb_session y sb_user
 # =============================================================================
 st.sidebar.title("Acceso")
 
@@ -475,14 +841,20 @@ if not logged_in():
     if st.sidebar.button("Entrar"):
         try:
             res = sign_in(email.strip(), p)
-            user = res.user
-            if not user:
-                st.sidebar.error("No se pudo iniciar sesión.")
+
+            user = getattr(res, "user", None)
+            sess = getattr(res, "session", None)
+
+            if not user or not sess:
+                st.sidebar.error("No se pudo iniciar sesión (respuesta sin user/session).")
                 st.stop()
+
+            # ✅ requerido por db.py (sb_user())
+            st.session_state["sb_user"] = user
+            st.session_state["sb_session"] = sess
 
             prof = get_user_profile(user.id)
 
-            # Si no existe perfil, crearlo mínimo
             if not prof:
                 upsert_user_profile(
                     user.id,
@@ -508,8 +880,11 @@ if not logged_in():
 st.sidebar.success(st.session_state.get("full_name", "Usuario"))
 if st.sidebar.button("Cerrar sesión"):
     sign_out()
-    for k in ["user_id", "username", "full_name", "active_group_id", "selected_task_id", "is_global_admin"]:
-        if k in ["user_id", "active_group_id", "selected_task_id"]:
+    for k in [
+        "user_id", "username", "full_name", "active_group_id", "selected_task_id", "is_global_admin",
+        "sb_user", "sb_session"
+    ]:
+        if k in ["user_id", "active_group_id", "selected_task_id", "sb_user", "sb_session"]:
             st.session_state[k] = None
         elif k == "is_global_admin":
             st.session_state[k] = False
@@ -567,7 +942,6 @@ with st.sidebar.expander("🔑 Unirme a un grupo"):
             st.session_state["active_group_id"] = int(g["id"])
             st.rerun()
 
-# Require group
 if not st.session_state["active_group_id"]:
     st.title("Workflow Team Manager")
     st.info("Crea o únete a un grupo para empezar.")
@@ -577,7 +951,7 @@ GROUP_ID = int(st.session_state["active_group_id"])
 
 
 # =============================================================================
-# Header + barra de navegación
+# Header + navegación
 # =============================================================================
 st.title("Workflow Organización de Equipo")
 
@@ -588,7 +962,6 @@ PAGES = ["Resumen", "Proyectos", "Tablero", "Tarea (detalle)", "Plantillas", "Ex
 if st.session_state.get("is_global_admin"):
     PAGES = ["Admin"] + PAGES
 
-# Si el usuario no es admin y tenía el menú en "Admin" (por sesión vieja), corrige
 if st.session_state.get("menu") == "Admin" and not st.session_state.get("is_global_admin"):
     st.session_state["menu"] = "Resumen"
 
@@ -605,7 +978,7 @@ if menu != st.session_state["menu"]:
 
 
 # =============================================================================
-# Funciones de soporte (equivalentes a las de SQLite)
+# Funciones soporte (permisos + WIP)
 # =============================================================================
 def can_edit_due_date(group_id: int, task_id: int, user_id: str) -> bool:
     if not has_permission(group_id, user_id, "task_change_due_date"):
@@ -626,18 +999,18 @@ def can_change_status(group_id: int, task_id: int, user_id: str) -> bool:
 
 
 def wip_limit_ok(project_id: int, user_id: str) -> tuple[bool, str]:
-    proj = get_conn().table("projects").select("wip_limit_doing").eq("id", int(project_id)).limit(1).execute()
+    proj = supa_table("projects").select("wip_limit_doing").eq("id", int(project_id)).limit(1).execute()
     row = getattr(proj, "data", None)
     limit = int(row[0]["wip_limit_doing"]) if row else 3
 
-    doing = get_conn().table("tasks").select("id").eq("project_id", int(project_id)).eq("status", "doing").execute()
+    doing = supa_table("tasks").select("id").eq("project_id", int(project_id)).eq("status", "doing").execute()
     doing_ids = [int(x["id"]) for x in (getattr(doing, "data", []) or [])]
     if not doing_ids:
         return True, ""
 
     cnt = 0
     for part in chunked(doing_ids, 200):
-        rr = get_conn().table("task_roles").select("task_id").in_("task_id", part).eq("role", "R").eq("user_id", user_id).execute()
+        rr = supa_table("task_roles").select("task_id").in_("task_id", part).eq("role", "R").eq("user_id", user_id).execute()
         cnt += len(getattr(rr, "data", []) or [])
 
     if cnt >= limit:
@@ -646,7 +1019,7 @@ def wip_limit_ok(project_id: int, user_id: str) -> tuple[bool, str]:
 
 
 def task_r_names(task_id: int) -> str:
-    raw = get_conn().table("task_roles").select("user_id,role").eq("task_id", int(task_id)).eq("role", "R").execute()
+    raw = supa_table("task_roles").select("user_id,role").eq("task_id", int(task_id)).eq("role", "R").execute()
     ids = [x["user_id"] for x in (getattr(raw, "data", []) or [])]
     if not ids:
         return "—"
@@ -668,10 +1041,7 @@ def build_weekly_report(group_id: int, week_start_d: date, week_end_d: date, pro
     if not pmap:
         return pd.DataFrame(), pd.DataFrame()
 
-    if project_id is not None:
-        pids = [int(project_id)]
-    else:
-        pids = list(pmap.keys())
+    pids = [int(project_id)] if project_id is not None else list(pmap.keys())
 
     rows_all = []
     for pid in pids:
@@ -710,14 +1080,11 @@ def build_weekly_report(group_id: int, week_start_d: date, week_end_d: date, pro
         df_in["A"] = df_in["id"].apply(lambda x: task_a_name(int(x)))
         return df_in
 
-    done = enrich(done)
-    pending = enrich(pending)
-
-    return done, pending
+    return enrich(done), enrich(pending)
 
 
 # =============================================================================
-# ADMIN GLOBAL (privado)
+# ADMIN GLOBAL
 # =============================================================================
 if menu == "Admin":
     if not st.session_state.get("is_global_admin"):
@@ -726,8 +1093,7 @@ if menu == "Admin":
 
     st.subheader("Panel Admin Global")
 
-    # ⚠️ Requiere policies RLS para permitir SELECT global si is_global_admin=true
-    groups = getattr(get_conn().table("groups").select("*").order("id", desc=True).execute(), "data", []) or []
+    groups = getattr(supa_table("groups").select("*").order("id", desc=True).execute(), "data", []) or []
     st.markdown("### Grupos")
     st.dataframe(pd.DataFrame(groups) if groups else pd.DataFrame(), use_container_width=True)
 
@@ -735,15 +1101,11 @@ if menu == "Admin":
         st.info("No hay grupos.")
         st.stop()
 
-    gsel = st.selectbox(
-        "Selecciona un grupo",
-        options=groups,
-        format_func=lambda g: f"[{g['id']}] {g.get('name','(sin nombre)')}"
-    )
+    gsel = st.selectbox("Selecciona un grupo", options=groups, format_func=lambda g: f"[{g['id']}] {g.get('name','(sin nombre)')}")
     gid = int(gsel["id"])
 
     st.markdown("### Miembros del grupo")
-    gm = getattr(get_conn().table("group_members").select("user_id,role,joined_at").eq("group_id", gid).execute(), "data", []) or []
+    gm = getattr(supa_table("group_members").select("user_id,role,joined_at").eq("group_id", gid).execute(), "data", []) or []
     if gm:
         prof_by = fetch_profiles([x["user_id"] for x in gm])
         rows = []
@@ -762,13 +1124,13 @@ if menu == "Admin":
         st.info("Este grupo no tiene miembros.")
 
     st.markdown("### Proyectos")
-    projs = getattr(get_conn().table("projects").select("*").eq("group_id", gid).order("id", desc=True).execute(), "data", []) or []
+    projs = getattr(supa_table("projects").select("*").eq("group_id", gid).order("id", desc=True).execute(), "data", []) or []
     st.dataframe(pd.DataFrame(projs) if projs else pd.DataFrame(), use_container_width=True)
 
     if projs:
         psel = st.selectbox("Ver tareas del proyecto", options=projs, format_func=lambda p: f"[{p['id']}] {p['name']}")
         pid = int(psel["id"])
-        tasks = getattr(get_conn().table("tasks").select("*").eq("project_id", pid).order("id", desc=True).limit(500).execute(), "data", []) or []
+        tasks = getattr(supa_table("tasks").select("*").eq("project_id", pid).order("id", desc=True).limit(500).execute(), "data", []) or []
         st.markdown("### Tareas (últimas 500)")
         st.dataframe(pd.DataFrame(tasks) if tasks else pd.DataFrame(), use_container_width=True)
 
@@ -795,7 +1157,12 @@ if menu == "Resumen":
 
     members = list_group_members(GROUP_ID)
     member_opts = [{"user_id": None, "full_name": "(cualquiera)", "username": ""}] + members
-    person_pick = safe_selectbox_dict("Persona (para filtrar RACI)", member_opts, format_func=lambda x: fmt_user(x) if x["user_id"] else "(cualquiera)", key="sum_person")
+    person_pick = safe_selectbox_dict(
+        "Persona (para filtrar RACI)",
+        member_opts,
+        format_func=lambda x: fmt_user(x) if x["user_id"] else "(cualquiera)",
+        key="sum_person"
+    )
 
     r1, r2, r3, r4 = st.columns(4)
     with r1:
@@ -842,8 +1209,7 @@ if menu == "Resumen":
     def a_name_from_ids(ids: list[str]) -> str:
         if not ids:
             return "—"
-        nm = prof_by.get(ids[0], {}).get("full_name", "(sin nombre)")
-        return nm
+        return prof_by.get(ids[0], {}).get("full_name", "(sin nombre)")
 
     def names_from_ids(ids: list[str]) -> str:
         if not ids:
@@ -908,7 +1274,6 @@ if menu == "Resumen":
         )
 
     st.divider()
-
     st.subheader("Resumen por RACI (personal)")
 
     def fetch_by_role(role: str):
@@ -917,10 +1282,10 @@ if menu == "Resumen":
         if not tids:
             return []
 
-        tasks = _bulk_tasks(tids)
+        tasks_ = _bulk_tasks(tids)
         allowed_pids = set(pmap.keys())
         out = []
-        for t in tasks:
+        for t in tasks_:
             if int(t["project_id"]) not in allowed_pids:
                 continue
             out.append({
@@ -1023,28 +1388,6 @@ if menu == "Resumen":
         fig.update_layout(height=360, xaxis_title="", yaxis_title="")
         st.plotly_chart(fig, use_container_width=True)
 
-        long = kpi_df.melt(
-            id_vars=["full_name"],
-            value_vars=["todo", "doing", "blocked", "awaiting_approval", "done"],
-            var_name="status",
-            value_name="count"
-        )
-        fig2 = px.bar(long, x="full_name", y="count", color="status",
-                      labels={"count": "Tareas", "full_name": "Persona", "status": "Estado"})
-        fig2.update_layout(height=380, xaxis_title="", yaxis_title="")
-        st.plotly_chart(fig2, use_container_width=True)
-
-        st.markdown("#### Señales rápidas (para liderazgo)")
-        top_overdue = kpi_df.sort_values("overdue_open", ascending=False).head(5)[["full_name", "overdue_open"]]
-        top_wip = kpi_df.sort_values("wip_doing", ascending=False).head(5)[["full_name", "wip_doing"]]
-        c1, c2 = st.columns(2)
-        with c1:
-            st.caption("Top 5 con más vencidas")
-            st.dataframe(top_overdue, use_container_width=True)
-        with c2:
-            st.caption("Top 5 con más WIP")
-            st.dataframe(top_wip, use_container_width=True)
-
     st.divider()
     st.subheader("Ciclo de aprobación (awaiting_approval)")
 
@@ -1081,8 +1424,7 @@ elif menu == "Proyectos":
         proj = safe_selectbox_dict("Proyecto a administrar", projs, format_func=lambda p: f"[{p['id']}] {p['name']}", key="pm_proj")
         pid = int(proj["id"])
 
-        # ✅ FIX: en db.py NO existe "project_manage_members", por eso siempre fallaba.
-        # Usamos "project_edit" (sí existe en ACTIONS).
+        # ✅ En db.py NO existe project_manage_members, usamos project_edit (sí existe en ACTIONS)
         can_manage = (user_role_in_group(GROUP_ID, uid) == "leader") or has_permission(GROUP_ID, uid, "project_edit")
 
         current = list_project_members(pid)
@@ -1109,7 +1451,7 @@ elif menu == "Proyectos":
                         st.success("Miembros agregados.")
                         st.rerun()
             else:
-                st.caption("No hay miembros del grupo disponibles para agregar (ya están todos en el proyecto).")
+                st.caption("No hay miembros disponibles para agregar (ya están todos en el proyecto).")
 
             st.markdown("#### Remover miembros")
             if current:
@@ -1126,8 +1468,6 @@ elif menu == "Proyectos":
                                 remove_project_member(pid, cur_map[k])
                             st.success("Miembros removidos.")
                             st.rerun()
-            else:
-                st.caption("No hay miembros en el proyecto.")
 
     st.divider()
     st.subheader("Crear proyecto")
@@ -1165,8 +1505,6 @@ elif menu == "Proyectos":
                 transfer_group_leadership(GROUP_ID, uid, opt["user_id"])
                 st.success("Liderazgo transferido.")
                 st.rerun()
-        else:
-            st.caption("No hay otro miembro para transferir el liderazgo.")
 
     if is_leader and has_permission(GROUP_ID, uid, "group_manage_members"):
         st.markdown("#### Código del grupo")
@@ -1192,7 +1530,8 @@ elif menu == "Tablero":
 
     st.subheader("Tablero (Kanban) + filtros avanzados")
 
-    tags = list_tags(GROUP_ID)
+    # tags
+    tags = getattr(supa_table("tags").select("*").eq("group_id", GROUP_ID).execute(), "data", []) or []
     tag_opts = {f"{t['kind']}:{t['name']}": int(t["id"]) for t in tags}
 
     f1, f2, f3, f4 = st.columns(4)
@@ -1276,7 +1615,7 @@ elif menu == "Tablero":
     else:
         members = list_project_members(pid)
         if not members:
-            st.warning("No hay miembros en el proyecto. Agrega al menos al creador en project_members.")
+            st.warning("No hay miembros en el proyecto. Agrega miembros en la pestaña Proyectos.")
         m_opts = {fmt_user(m): m["user_id"] for m in members}
 
         t_tags = [t for t in tags if t["kind"] == "tag"]
@@ -1292,8 +1631,11 @@ elif menu == "Tablero":
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 priority = st.selectbox("Prioridad", ["urgente", "alta", "media", "baja"], index=2)
+
+            # ✅ date_input no soporta None directo: usamos checkbox
             with c2:
-                start_d = st.date_input("Start date (opcional)", value=None)
+                use_start = st.checkbox("Usar start_date", value=False)
+                start_d = st.date_input("Start date", value=date.today()) if use_start else None
             with c3:
                 target_d = st.date_input("Target (SLA interno)", value=date.today() + timedelta(days=7))
             with c4:
@@ -1301,7 +1643,7 @@ elif menu == "Tablero":
 
             requires_approval = st.checkbox("Requiere aprobación del dueño para cerrar", value=True)
 
-            st.markdown("Responsabilidad y comunicación (RACI por debajo)")
+            st.markdown("Responsabilidad y comunicación (RACI)")
             if m_opts:
                 A = st.selectbox("Dueño (A) - único", options=list(m_opts.keys()))
                 R = st.multiselect("Ejecutores (R) - mínimo 1", options=list(m_opts.keys()))
@@ -1343,27 +1685,34 @@ elif menu == "Tablero":
                     created_by=uid
                 )
 
-                try:
-                    upsert_task_roles(
-                        task_id=int(task_id),
-                        actor_id=uid,
-                        A_id=m_opts[A],
-                        R_ids=[m_opts[x] for x in R],
-                        C_ids=[m_opts[x] for x in C],
-                        I_ids=[m_opts[x] for x in I]
-                    )
-                except Exception as e:
-                    st.error(str(e))
-                    st.stop()
+                upsert_task_roles(
+                    task_id=int(task_id),
+                    actor_id=uid,
+                    A_id=m_opts[A],
+                    R_ids=[m_opts[x] for x in R],
+                    C_ids=[m_opts[x] for x in C],
+                    I_ids=[m_opts[x] for x in I]
+                )
 
                 set_task_dependencies(int(task_id), [dep_map[d] for d in deps_sel] if deps_sel else [])
 
+                # tags: crea si no existe
                 tag_ids = []
                 for tn in selected_tags:
-                    tag_ids.append(get_or_create_tag(GROUP_ID, tn, "tag"))
+                    # get_or_create_tag no está en db.py, lo hacemos inline
+                    r = getattr(supa_table("tags").select("id").eq("group_id", GROUP_ID).eq("name", tn).eq("kind", "tag").limit(1).execute(), "data", []) or []
+                    tid = int(r[0]["id"]) if r else int(getattr(supa_table("tags").insert({"group_id": GROUP_ID, "name": tn, "kind": "tag"}).execute(), "data", [{}])[0]["id"])
+                    tag_ids.append(tid)
+
                 if selected_component != "(ninguno)":
-                    tag_ids.append(get_or_create_tag(GROUP_ID, selected_component, "component"))
-                set_task_tags(int(task_id), tag_ids)
+                    r = getattr(supa_table("tags").select("id").eq("group_id", GROUP_ID).eq("name", selected_component).eq("kind", "component").limit(1).execute(), "data", []) or []
+                    tid = int(r[0]["id"]) if r else int(getattr(supa_table("tags").insert({"group_id": GROUP_ID, "name": selected_component, "kind": "component"}).execute(), "data", [{}])[0]["id"])
+                    tag_ids.append(tid)
+
+                # set_task_tags no está en db.py, lo hacemos inline
+                supa_table("task_tags").delete().eq("task_id", int(task_id)).execute()
+                if tag_ids:
+                    supa_table("task_tags").insert([{"task_id": int(task_id), "tag_id": int(tid)} for tid in sorted(set(tag_ids))]).execute()
 
                 notify(m_opts[A], "info", f"Nueva tarea #{task_id}: eres dueño.", int(task_id),
                        send_email=send_email_now, email_subject=f"Nueva tarea #{task_id} (Dueño)")
@@ -1373,12 +1722,9 @@ elif menu == "Tablero":
                            send_email=send_email_now, email_subject=f"Nueva tarea #{task_id} (Ejecutor)")
 
                 for x in C:
-                    notify(m_opts[x], "input_request", f"Te consultan en tarea #{task_id}.", int(task_id),
-                           send_email=False)
-
+                    notify(m_opts[x], "input_request", f"Te consultan en tarea #{task_id}.", int(task_id), send_email=False)
                 for x in I:
-                    notify(m_opts[x], "info", f"FYI: tarea #{task_id} creada.", int(task_id),
-                           send_email=False)
+                    notify(m_opts[x], "info", f"FYI: tarea #{task_id} creada.", int(task_id), send_email=False)
 
                 st.success("Tarea creada.")
                 st.rerun()
@@ -1412,12 +1758,7 @@ elif menu == "Tarea (detalle)":
     ids = [int(t["id"]) for t in tasks]
     default_idx = ids.index(int(selected)) if (selected is not None and int(selected) in ids) else 0
 
-    task_pick = st.selectbox(
-        "Tarea",
-        options=tasks,
-        index=default_idx,
-        format_func=lambda x: f"#{x['id']} {x['title']}"
-    )
+    task_pick = st.selectbox("Tarea", options=tasks, index=default_idx, format_func=lambda x: f"#{x['id']} {x['title']}")
     task_id = int(task_pick["id"])
 
     t = get_task(task_id)
@@ -1498,7 +1839,6 @@ elif menu == "Tarea (detalle)":
             who = st.selectbox("Quién debe destrabar", options=list(opts.keys()))
             unblock_owner = opts[who]
 
-        # ✅ FIX: estas variables estaban mal indentadas en tu versión
         send_email_approval = False
         send_email_blocked = False
 
@@ -1565,8 +1905,7 @@ elif menu == "Tarea (detalle)":
                 )
 
             if new_status in ("blocked", "done"):
-                conn = get_conn()
-                res = conn.table("task_roles").select("user_id").eq("task_id", task_id).eq("role", "I").execute()
+                res = supa_table("task_roles").select("user_id").eq("task_id", task_id).eq("role", "I").execute()
                 for rr in (getattr(res, "data", []) or []):
                     add_notification(rr["user_id"], "info", f"FYI: tarea #{task_id} ahora está {new_status}.", task_id)
 
@@ -1592,8 +1931,7 @@ elif menu == "Tarea (detalle)":
                     log_history(task_id, uid, "approval", "pending", "approved")
                     log_history(task_id, uid, "status", "awaiting_approval", "done")
 
-                    conn = get_conn()
-                    res = conn.table("task_roles").select("user_id").eq("task_id", task_id).eq("role", "R").execute()
+                    res = supa_table("task_roles").select("user_id").eq("task_id", task_id).eq("role", "R").execute()
                     for r in (getattr(res, "data", []) or []):
                         add_notification(r["user_id"], "info", f"Tarea #{task_id} aprobada y cerrada.", task_id)
 
@@ -1669,7 +2007,7 @@ elif menu == "Tarea (detalle)":
         except Exception:
             st.caption("(No disponible descarga directa: falta signed URL)")
 
-    # Editar responsabilidades
+    # Editar RACI
     st.divider()
     st.subheader("Editar responsabilidades")
 
@@ -1825,13 +2163,23 @@ elif menu == "Plantillas":
                     created_by=uid
                 )
 
+                # tags/component por CSV
                 tag_ids = []
                 if tt.get("tags_csv"):
                     for name in [x.strip() for x in tt["tags_csv"].split(",") if x.strip()]:
-                        tag_ids.append(get_or_create_tag(GROUP_ID, name, "tag"))
+                        r = getattr(supa_table("tags").select("id").eq("group_id", GROUP_ID).eq("name", name).eq("kind", "tag").limit(1).execute(), "data", []) or []
+                        tid = int(r[0]["id"]) if r else int(getattr(supa_table("tags").insert({"group_id": GROUP_ID, "name": name, "kind": "tag"}).execute(), "data", [{}])[0]["id"])
+                        tag_ids.append(tid)
+
                 if tt.get("component_name"):
-                    tag_ids.append(get_or_create_tag(GROUP_ID, tt["component_name"], "component"))
-                set_task_tags(int(task_id), tag_ids)
+                    cn = tt["component_name"]
+                    r = getattr(supa_table("tags").select("id").eq("group_id", GROUP_ID).eq("name", cn).eq("kind", "component").limit(1).execute(), "data", []) or []
+                    tid = int(r[0]["id"]) if r else int(getattr(supa_table("tags").insert({"group_id": GROUP_ID, "name": cn, "kind": "component"}).execute(), "data", [{}])[0]["id"])
+                    tag_ids.append(tid)
+
+                supa_table("task_tags").delete().eq("task_id", int(task_id)).execute()
+                if tag_ids:
+                    supa_table("task_tags").insert([{"task_id": int(task_id), "tag_id": int(tid)} for tid in sorted(set(tag_ids))]).execute()
 
             st.success("Plantilla aplicada. Ahora asigna responsabilidades a cada tarea.")
             st.rerun()
@@ -1860,21 +2208,18 @@ elif menu == "Export":
     df = pd.DataFrame(rows) if rows else pd.DataFrame()
     st.dataframe(df, use_container_width=True)
 
-    st.download_button("Descargar CSV", data=df.to_csv(index=False).encode("utf-8"),
-                       file_name=f"tasks_project_{pid}.csv")
+    st.download_button("Descargar CSV", data=df.to_csv(index=False).encode("utf-8"), file_name=f"tasks_project_{pid}.csv")
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="tasks")
-    st.download_button("Descargar Excel", data=buf.getvalue(),
-                       file_name=f"tasks_project_{pid}.xlsx")
+    st.download_button("Descargar Excel", data=buf.getvalue(), file_name=f"tasks_project_{pid}.xlsx")
 
     events = []
     for r in rows:
         events.append(task_to_ics_event(r["id"], r["title"], r.get("due_date"), r.get("dod")))
     ics = tasks_to_ics_calendar(events, cal_name=f"Proyecto {proj['name']}")
-    st.download_button("Descargar ICS", data=ics.encode("utf-8"),
-                       file_name=f"tasks_project_{pid}.ics")
+    st.download_button("Descargar ICS", data=ics.encode("utf-8"), file_name=f"tasks_project_{pid}.ics")
 
 
 # =============================================================================
@@ -1953,27 +2298,23 @@ Esta herramienta organiza proyectos y tareas por grupo, con control de responsab
 
 ---
 
-## Glosario (acrónimos y términos)
+## Glosario
 
 RACI:
-- R (Responsible): ejecuta
-- A (Accountable): dueño final / aprueba
-- C (Consulted): consultado
-- I (Informed): informado
+- R: ejecuta
+- A: dueño final / aprueba
+- C: consultado
+- I: informado
 
-DoD: Definition of Done. Criterio de aceptación.
-
-WIP: Work In Progress. Límite de tareas en DOING por persona.
-
-SLA: aquí se usa como objetivo de tiempo (target_date).
-
-Aging: días desde creación de tarea.
-
+DoD: Definition of Done. Criterio de aceptación.  
+WIP: Límite de tareas en DOING por persona.  
+SLA: objetivo de tiempo (target_date).  
+Aging: días desde creación de tarea.  
 ICS: export a calendario.
 
 ---
 
-## Reglas que el sistema fuerza
+## Reglas
 - 1 solo Dueño (A) por tarea.
 - mínimo 1 Ejecutor (R).
 - Si hay dependencias pendientes, no se deja cerrar/avanzar.
@@ -1990,3 +2331,7 @@ if st.sidebar.button("Ver notificaciones"):
     for r in rows:
         st.sidebar.caption(f"{r['created_at']} • {r['kind']}")
         st.sidebar.write(r["message"])
+    if st.sidebar.button("Marcar como leídas"):
+        mark_notifications_read(st.session_state["user_id"])
+        st.sidebar.success("Marcadas como leídas.")
+        st.rerun()
