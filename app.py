@@ -212,7 +212,7 @@ def is_responsible(task_id: int, user_id: str) -> bool:
 
 def upsert_task_roles(
     task_id: int,
-    actor_id: str,
+    user_id: str,
     A_id: str,
     R_ids: list[str],
     C_ids: list[str],
@@ -306,7 +306,7 @@ def add_task_comment(task_id: int, user_id: str, comment: str, progress_pct: int
 def list_task_history(task_id: int, limit: int = 200) -> list[dict]:
     rows = getattr(
         supa_table("task_history")
-        .select("id,task_id,actor_id,field,old_value,new_value,created_at")
+        .select("id,task_id,user_id,field,old_value,new_value,created_at")
         .eq("task_id", int(task_id))
         .order("id", desc=True)
         .limit(limit)
@@ -314,19 +314,19 @@ def list_task_history(task_id: int, limit: int = 200) -> list[dict]:
         "data",
         [],
     ) or []
-    uids = sorted({r["actor_id"] for r in rows if r.get("actor_id")})
+    uids = sorted({r["user_id"] for r in rows if r.get("user_id")})
     prof_by = fetch_profiles(uids)
     for r in rows:
-        p = prof_by.get(r.get("actor_id", ""), {})
-        r["actor_name"] = p.get("full_name", "(sin nombre)")
+        p = prof_by.get(r.get("user_id", ""), {})
+        r["user_name"] = p.get("full_name", "(sin nombre)")
     return rows
 
 
-def log_history(task_id: int, actor_id: str, field: str, old_value, new_value) -> None:
+def log_history(task_id: int, user_id: str, field: str, old_value, new_value) -> None:
     supa_table("task_history").insert(
         {
             "task_id": int(task_id),
-            "actor_id": actor_id,
+            "user_id": user_id,
             "field": field,
             "old_value": None if old_value is None else str(old_value),
             "new_value": None if new_value is None else str(new_value),
@@ -415,17 +415,16 @@ def list_approvals_by_group(group_id: int, project_id: int | None = None) -> lis
 
 # ---------- Notifications ----------
 def add_notification(target_user_id: str, kind: str, message: str, task_id: int | None = None) -> None:
-    client = get_conn()
-    actor = st.session_state["user_id"]
-
-    # RPC: public.notify_user(actor, target, kind, message, task_id)
-    client.rpc("notify_user", {
-        "p_actor_id": actor,
-        "p_target_user_id": target_user_id,
-        "p_kind": kind,
-        "p_message": message,
-        "p_task_id": int(task_id) if task_id is not None else None
-    }).execute()
+    supa_table("notifications").insert(
+        {
+            "user_id": target_user_id,
+            "kind": kind,
+            "message": message,
+            "task_id": int(task_id) if task_id is not None else None,
+            "created_at": now_iso(),
+            "read_at": None,
+        }
+    ).execute()
 
 
 
@@ -1687,7 +1686,7 @@ elif menu == "Tablero":
 
                 upsert_task_roles(
                     task_id=int(task_id),
-                    actor_id=uid,
+                    user_id=uid,
                     A_id=m_opts[A],
                     R_ids=[m_opts[x] for x in R],
                     C_ids=[m_opts[x] for x in C],
@@ -2045,7 +2044,7 @@ elif menu == "Tarea (detalle)":
             try:
                 upsert_task_roles(
                     task_id=task_id,
-                    actor_id=uid,
+                    user_id=uid,
                     A_id=opts[A_pick],
                     R_ids=[opts[x] for x in R_pick],
                     C_ids=[opts[x] for x in C_pick],
