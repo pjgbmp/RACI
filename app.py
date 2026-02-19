@@ -64,10 +64,8 @@ def fmt_user(u: dict) -> str:
 
 
 def _to_dt(x):
-    try:
-        return pd.to_datetime(x)
-    except Exception:
-        return pd.NaT
+    return pd.to_datetime(x, errors="coerce", utc=True)
+
 
 
 def week_bounds(d: date):
@@ -702,7 +700,7 @@ def compute_kpis_per_person(group_id: int, project_id: int | None = None) -> pd.
     df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce")
     df["completed_at_dt"] = pd.to_datetime(df["completed_at"], errors="coerce")
     df["due_dt"] = pd.to_datetime(df["due_date"], errors="coerce")
-    now = pd.Timestamp.now()
+    now = pd.Timestamp.now(tz="UTC")
 
     status_counts = (df.groupby(["user_id", "full_name", "status"]).size().unstack(fill_value=0).reset_index())
     for col in ["todo", "doing", "blocked", "awaiting_approval", "done"]:
@@ -802,7 +800,7 @@ def approvals_kpi_by_accountable(group_id: int, project_id: int | None = None) -
     df = df.rename(columns={"accountable_user_id": "a_user_id"})
     df["requested_at_dt"] = df["requested_at"].apply(_to_dt)
     df["decided_at_dt"] = df["decided_at"].apply(_to_dt)
-    now = pd.Timestamp.now()
+    now = pd.Timestamp.now(tz="UTC")
 
     df["cycle_hours"] = None
     pending = df["status"] == "pending"
