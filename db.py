@@ -88,21 +88,23 @@ def sb_anon():
     return create_client(url, anon)
 
 
+
 def sb_user():
     """
-    Cliente que actúa como el usuario logueado (RLS se aplica).
-    Requiere que en session_state exista:
-      - st.session_state["sb_session"].access_token
-      - st.session_state["sb_session"].refresh_token
+    Cliente Supabase por sesión de Streamlit (NO por función).
+    Evita Errno 24 por crear cientos/miles de clientes.
     """
-    url, anon = _supabase_url_key()
-    client = create_client(url, anon)
+    if "sb_client" not in st.session_state:
+        url, anon = _supabase_url_key()
+        st.session_state["sb_client"] = create_client(url, anon)
+
+    client = st.session_state["sb_client"]
 
     sess = st.session_state.get("sb_session")
     if not sess:
         raise RuntimeError("No hay sesión activa. Falta st.session_state['sb_session'].")
 
-    # set_session(access, refresh)
+    # Importante: refresca tokens en el cliente existente
     client.auth.set_session(sess.access_token, sess.refresh_token)
     return client
 
