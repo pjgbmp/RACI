@@ -120,6 +120,15 @@ def chunked(lst, n=200):
         yield lst[i:i + n]
 
 
+def safe_execute(query, default=None):
+    """Wrapper seguro para llamadas a Supabase. Retorna default si falla."""
+    try:
+        return getattr(query.execute(), "data", default) or default
+    except Exception as e:
+        st.warning(f"⚠️ Error al consultar la base de datos: {e}")
+        return default if default is not None else []
+
+
 # =============================================================================
 # STORAGE (Adjuntos) — ✅ FIX: sin .client, usando supabase-py directo
 # =============================================================================
@@ -613,9 +622,23 @@ def notify(
 # =============================================================================
 # KPIs / Resumen
 # =============================================================================
+@st.cache_data(ttl=60)
 def _project_map(group_id: int) -> dict[int, dict]:
+    """Cachea el mapa de proyectos por 60 s para evitar llamadas repetidas."""
     projs = list_projects(group_id)
     return {int(p["id"]): p for p in projs}
+
+
+@st.cache_data(ttl=60)
+def _cached_group_members(group_id: int) -> list[dict]:
+    """Versión cacheada de list_group_members."""
+    return list_group_members(group_id)
+
+
+@st.cache_data(ttl=60)
+def _cached_fetch_profiles(uids_tuple: tuple) -> dict:
+    """Versión cacheada de fetch_profiles (recibe tuple para ser hasheable)."""
+    return fetch_profiles(list(uids_tuple))
 
 
 def _fetch_group_task_ids(group_id: int, project_id: int | None = None, limit_per_project: int = 600) -> list[int]:
@@ -697,9 +720,9 @@ def compute_kpis_per_person(group_id: int, project_id: int | None = None) -> pd.
     prof_by = fetch_profiles(df["user_id"].unique().tolist())
     df["full_name"] = df["user_id"].map(lambda x: prof_by.get(x, {}).get("full_name", "(sin nombre)"))
 
-    df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce")
-    df["completed_at_dt"] = pd.to_datetime(df["completed_at"], errors="coerce")
-    df["due_dt"] = pd.to_datetime(df["due_date"], errors="coerce")
+    df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+    df["completed_at_dt"] = pd.to_datetime(df["completed_at"], errors="coerce", utc=True)
+    df["due_dt"] = pd.to_datetime(df["due_date"], errors="coerce", utc=True)
     now = pd.Timestamp.now(tz="UTC")
 
     status_counts = (df.groupby(["user_id", "full_name", "status"]).size().unstack(fill_value=0).reset_index())
@@ -747,22 +770,37 @@ def compute_kpis_per_person(group_id: int, project_id: int | None = None) -> pd.
         out["on_time_rate_done"] = pd.to_numeric(out["on_time_rate_done"], errors="coerce")
         out["on_time_rate_done"] = (out["on_time_rate_done"] * 100).round(0).astype("Int64")
 
+    # Renombrar columnas internas a español para la UI
+    rename_map = {
+        "full_name": "nombre",
+        "todo": "por_hacer",
+        "doing": "en_curso",
+        "blocked": "bloqueadas",
+        "awaiting_approval": "en_aprobacion",
+        "done": "completadas",
+        "wip_doing": "wip_en_curso",
+        "overdue_open": "vencidas_abiertas",
+        "avg_aging_days_open": "antiguedad_prom_dias",
+        "avg_lead_time_days_done_60d": "tiempo_cierre_prom_60d",
+        "on_time_rate_done": "tasa_cumplimiento_pct",
+    }
+    out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
     return out
 
 
 def kpi_badges_row(df_kpi: pd.DataFrame):
     if df_kpi.empty:
         return
-    total_overdue = int(df_kpi["overdue_open"].sum())
-    total_wip = int(df_kpi["wip_doing"].sum())
-    avg_aging = df_kpi["avg_aging_days_open"].dropna().mean()
-    ontime = df_kpi["on_time_rate_done"].dropna().mean()
+    total_overdue = int(df_kpi.get("vencidas_abiertas", pd.Series([0])).sum())
+    total_wip = int(df_kpi.get("wip_en_curso", pd.Series([0])).sum())
+    avg_aging = df_kpi.get("antiguedad_prom_dias", pd.Series(dtype=float)).dropna().mean()
+    ontime = df_kpi.get("tasa_cumplimiento_pct", pd.Series(dtype=float)).dropna().mean()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Overdue (abiertas)", total_overdue)
-    c2.metric("WIP (doing)", total_wip)
-    c3.metric("Aging promedio (días)", round(float(avg_aging), 1) if pd.notna(avg_aging) else "—")
-    c4.metric("On-time promedio (%)", int(ontime) if pd.notna(ontime) else "—")
+    c1.metric("🔴 Tareas vencidas abiertas", total_overdue)
+    c2.metric("🔵 En curso (WIP)", total_wip)
+    c3.metric("📅 Antigüedad promedio (días)", round(float(avg_aging), 1) if pd.notna(avg_aging) else "—")
+    c4.metric("✅ Cumplimiento a tiempo (%)", int(ontime) if pd.notna(ontime) else "—")
 
 
 def approval_cycle_hours(task_id: int) -> float | None:
@@ -809,19 +847,20 @@ def approvals_kpi_by_accountable(group_id: int, project_id: int | None = None) -
     df.loc[decided, "cycle_hours"] = (df.loc[decided, "decided_at_dt"] - df.loc[decided, "requested_at_dt"]).dt.total_seconds() / 3600
 
     pend = (df[pending].groupby(["a_user_id", "full_name"])
-            .agg(pending_count=("task_id", "count"),
-                 avg_cycle_hours_pending=("cycle_hours", "mean"))
+            .agg(pendientes_count=("task_id", "count"),
+                 horas_ciclo_pendientes=("cycle_hours", "mean"))
             .reset_index())
 
     cutoff = now - pd.Timedelta(days=60)
     dec60 = df[decided & (df["decided_at_dt"] >= cutoff)]
     dec = (dec60.groupby(["a_user_id", "full_name"])
-           .agg(avg_cycle_hours_approved_60d=("cycle_hours", "mean"))
+           .agg(horas_ciclo_aprobadas_60d=("cycle_hours", "mean"))
            .reset_index())
 
     out = pd.merge(pend, dec, on=["a_user_id", "full_name"], how="outer")
-    out["pending_count"] = out["pending_count"].fillna(0).astype(int)
-    for col in ["avg_cycle_hours_pending", "avg_cycle_hours_approved_60d"]:
+    out = out.rename(columns={"full_name": "nombre"})
+    out["pendientes_count"] = out["pendientes_count"].fillna(0).astype(int)
+    for col in ["horas_ciclo_pendientes", "horas_ciclo_aprobadas_60d"]:
         out[col] = pd.to_numeric(out.get(col), errors="coerce").round(2).astype("Float64")
     return out
 
@@ -953,7 +992,8 @@ GROUP_ID = int(st.session_state["active_group_id"])
 st.title("Workflow Organización de Equipo")
 
 unread = unread_notifications_count(st.session_state["user_id"])
-st.caption(f"🔔 Notificaciones sin leer: {unread}")
+badge = f" ({unread})" if unread > 0 else ""
+st.caption(f"🔔 Notificaciones sin leer{badge}" if unread > 0 else "🔔 Sin notificaciones nuevas")
 
 PAGES = ["Resumen", "Proyectos", "Tablero", "Tarea (detalle)", "Plantillas", "Export", "Gobernanza", "Reportes", "Ayuda"]
 if st.session_state.get("is_global_admin"):
@@ -1033,6 +1073,90 @@ def task_a_name(task_id: int) -> str:
     return (p.get("full_name") if p else "—") or "—"
 
 
+# ── Versiones BULK para build_weekly_report ───────────────────────────────────
+
+def _bulk_raci_names(task_ids: list[int]) -> tuple[dict[int, str], dict[int, str]]:
+    """
+    Retorna (r_names, a_names) como dicts {task_id: str} en UNA sola consulta.
+    Reemplaza los bucles de task_r_names / task_a_name por tarea.
+    """
+    if not task_ids:
+        return {}, {}
+
+    all_roles: list[dict] = []
+    for part in chunked(task_ids, 200):
+        rows = safe_execute(
+            supa_table("task_roles").select("task_id,user_id,role").in_("task_id", part),
+            default=[]
+        )
+        all_roles.extend(rows)
+
+    all_uids = list({r["user_id"] for r in all_roles if r.get("user_id")})
+    prof_by = fetch_profiles(all_uids) if all_uids else {}
+
+    r_names: dict[int, list[str]] = {}
+    a_names: dict[int, str] = {}
+
+    for row in all_roles:
+        tid = int(row["task_id"])
+        uid = row.get("user_id", "")
+        name = prof_by.get(uid, {}).get("full_name", "(sin nombre)")
+        if row["role"] == "R":
+            r_names.setdefault(tid, []).append(name)
+        elif row["role"] == "A":
+            if tid not in a_names:
+                a_names[tid] = name
+
+    return (
+        {tid: ", ".join(sorted(ns)) for tid, ns in r_names.items()},
+        a_names,
+    )
+
+
+def _bulk_approval_cycle(task_ids: list[int]) -> dict[int, float | None]:
+    """
+    Retorna {task_id: cycle_hours} en UNA sola consulta de approval_requests.
+    Reemplaza el bucle de approval_cycle_hours por tarea.
+    """
+    if not task_ids:
+        return {}
+
+    all_appr: list[dict] = []
+    for part in chunked(task_ids, 200):
+        rows = safe_execute(
+            supa_table("approval_requests")
+            .select("task_id,requested_at,decided_at,status")
+            .in_("task_id", part)
+            .order("id", desc=True),
+            default=[]
+        )
+        all_appr.extend(rows)
+
+    # Solo la aprobación más reciente por tarea
+    seen: set[int] = set()
+    result: dict[int, float | None] = {}
+    now = pd.Timestamp.now(tz="UTC")
+
+    for row in all_appr:
+        tid = int(row["task_id"])
+        if tid in seen:
+            continue
+        seen.add(tid)
+        req = _to_dt(row.get("requested_at"))
+        if pd.isna(req):
+            result[tid] = None
+            continue
+        if row.get("status") == "pending":
+            end = now
+        else:
+            end = _to_dt(row.get("decided_at"))
+            if pd.isna(end):
+                end = now
+        result[tid] = round(float((end - req).total_seconds() / 3600), 2)
+
+    return result
+
+
 def build_weekly_report(group_id: int, week_start_d: date, week_end_d: date, project_id: int | None = None):
     pmap = _project_map(group_id)
     if not pmap:
@@ -1052,18 +1176,26 @@ def build_weekly_report(group_id: int, week_start_d: date, week_end_d: date, pro
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    df["completed_at_dt"] = pd.to_datetime(df["completed_at"], errors="coerce")
-    df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce")
-    df["due_dt"] = pd.to_datetime(df["due_date"], errors="coerce")
+    df["completed_at_dt"] = pd.to_datetime(df["completed_at"], errors="coerce", utc=True)
+    df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+    df["due_dt"] = pd.to_datetime(df["due_date"], errors="coerce", utc=True)
+
+    ws_ts = pd.Timestamp(week_start_d, tz="UTC")
+    we_ts = pd.Timestamp(week_end_d, tz="UTC") + pd.Timedelta(hours=23, minutes=59, seconds=59)
 
     done = df[
         (df["status"] == "done")
         & df["completed_at_dt"].notna()
-        & (df["completed_at_dt"].dt.date >= week_start_d)
-        & (df["completed_at_dt"].dt.date <= week_end_d)
+        & (df["completed_at_dt"] >= ws_ts)
+        & (df["completed_at_dt"] <= we_ts)
     ].copy()
 
     pending = df[df["status"].isin(["todo", "doing", "blocked", "awaiting_approval"])].copy()
+
+    # Pre-carga bulk de RACI y aprobaciones (evita N llamadas por tarea)
+    all_ids_report = list(df["id"].astype(int).unique())
+    bulk_r, bulk_a = _bulk_raci_names(all_ids_report)
+    bulk_appr = _bulk_approval_cycle(all_ids_report)
 
     def enrich(df_in: pd.DataFrame) -> pd.DataFrame:
         if df_in.empty:
@@ -1072,9 +1204,10 @@ def build_weekly_report(group_id: int, week_start_d: date, week_end_d: date, pro
         df_in["lead_days"] = None
         ok = df_in["created_at_dt"].notna() & df_in["completed_at_dt"].notna()
         df_in.loc[ok, "lead_days"] = (df_in.loc[ok, "completed_at_dt"] - df_in.loc[ok, "created_at_dt"]).dt.days
-        df_in["approval_hours"] = df_in["id"].apply(lambda x: approval_cycle_hours(int(x)))
-        df_in["R"] = df_in["id"].apply(lambda x: task_r_names(int(x)))
-        df_in["A"] = df_in["id"].apply(lambda x: task_a_name(int(x)))
+        # Bulk lookups — sin llamadas individuales por fila
+        df_in["horas_aprobacion"] = df_in["id"].astype(int).map(lambda x: bulk_appr.get(x))
+        df_in["ejecutores"] = df_in["id"].astype(int).map(lambda x: bulk_r.get(x, "—"))
+        df_in["dueno"] = df_in["id"].astype(int).map(lambda x: bulk_a.get(x, "—"))
         return df_in
 
     return enrich(done), enrich(pending)
@@ -1370,23 +1503,39 @@ if menu == "Resumen":
         kpi_badges_row(kpi_df)
 
         show_cols = [
-            "full_name",
-            "todo", "doing", "blocked", "awaiting_approval", "done",
-            "wip_doing", "overdue_open",
-            "avg_aging_days_open",
-            "avg_lead_time_days_done_60d",
-            "on_time_rate_done"
+            "nombre",
+            "por_hacer", "en_curso", "bloqueadas", "en_aprobacion", "completadas",
+            "wip_en_curso", "vencidas_abiertas",
+            "antiguedad_prom_dias",
+            "tiempo_cierre_prom_60d",
+            "tasa_cumplimiento_pct",
         ]
+        show_cols = [c for c in show_cols if c in kpi_df.columns]
         st.dataframe(kpi_df[show_cols], use_container_width=True, height=420)
 
-        chart_df = kpi_df[["full_name", "wip_doing", "overdue_open"]].copy()
-        fig = px.bar(chart_df, x="full_name", y=["wip_doing", "overdue_open"], barmode="group",
-                     labels={"value": "Cantidad", "full_name": "Persona", "variable": "Métrica"})
-        fig.update_layout(height=360, xaxis_title="", yaxis_title="")
-        st.plotly_chart(fig, use_container_width=True)
+        # Alerta WIP: usuarios que superan el límite por defecto (3)
+        wip_col = "wip_en_curso"
+        if wip_col in kpi_df.columns:
+            over_wip = kpi_df[kpi_df[wip_col] >= 3][["nombre", wip_col]]
+            if not over_wip.empty:
+                nombres = ", ".join(over_wip["nombre"].tolist())
+                st.warning(f"⚠️ **Límite WIP alcanzado o superado** por: {nombres}. Considera redistribuir tareas.")
+
+        chart_df = kpi_df[["nombre", "wip_en_curso", "vencidas_abiertas"]].copy() if "nombre" in kpi_df.columns else pd.DataFrame()
+        if not chart_df.empty:
+            fig = px.bar(
+                chart_df, x="nombre",
+                y=["wip_en_curso", "vencidas_abiertas"],
+                barmode="group",
+                labels={"value": "Cantidad", "nombre": "Persona", "variable": "Métrica",
+                        "wip_en_curso": "En curso (WIP)", "vencidas_abiertas": "Vencidas abiertas"},
+                color_discrete_map={"wip_en_curso": "#4C8BF5", "vencidas_abiertas": "#E53935"},
+            )
+            fig.update_layout(height=360, xaxis_title="", yaxis_title="", legend_title="")
+            st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
-    st.subheader("Ciclo de aprobación (awaiting_approval)")
+    st.subheader("Ciclo de aprobación (en aprobación)")
 
     proj_ap = safe_selectbox_dict("Filtrar aprobaciones por proyecto (opcional)", proj_ids_for_kpi, format_func=lambda x: x["name"], key="appr_proj_filter")
     appr_df = approvals_kpi_by_accountable(GROUP_ID, project_id=int(proj_ap["id"]) if proj_ap and proj_ap["id"] else None)
@@ -1394,10 +1543,10 @@ if menu == "Resumen":
         st.info("No hay aprobaciones registradas todavía.")
     else:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Pendientes totales", int(appr_df["pending_count"].sum()))
-        c2.metric("Promedio horas pendientes", float(appr_df["avg_cycle_hours_pending"].dropna().mean()) if appr_df["avg_cycle_hours_pending"].notna().any() else "—")
-        c3.metric("Promedio horas aprobadas (60d)", float(appr_df["avg_cycle_hours_approved_60d"].dropna().mean()) if appr_df["avg_cycle_hours_approved_60d"].notna().any() else "—")
-        st.dataframe(appr_df.sort_values(["pending_count", "avg_cycle_hours_pending"], ascending=False),
+        c1.metric("⏳ Aprobaciones pendientes", int(appr_df["pendientes_count"].sum()))
+        c2.metric("🕐 Horas promedio pendientes", round(float(appr_df["horas_ciclo_pendientes"].dropna().mean()), 1) if appr_df["horas_ciclo_pendientes"].notna().any() else "—")
+        c3.metric("✅ Horas promedio aprobadas (60d)", round(float(appr_df["horas_ciclo_aprobadas_60d"].dropna().mean()), 1) if appr_df["horas_ciclo_aprobadas_60d"].notna().any() else "—")
+        st.dataframe(appr_df.sort_values(["pendientes_count", "horas_ciclo_pendientes"], ascending=False),
                      use_container_width=True, height=320)
 
 
@@ -1578,7 +1727,7 @@ elif menu == "Tablero":
             pass
 
         with st.container(border=True):
-            st.caption(f"#{t['id']} • {t['priority']} • due {due} • aging {aging_days}d" if aging_days is not None else f"#{t['id']} • {t['priority']} • due {due}")
+            st.caption(f"#{t['id']} • {t['priority']} • vence {due} • antigüedad {aging_days}d" if aging_days is not None else f"#{t['id']} • {t['priority']} • vence {due}")
             st.write(t["title"])
             st.caption(f"Dueño: {A}")
             st.caption(f"Ejecutores: {Rs}")
@@ -1591,12 +1740,35 @@ elif menu == "Tablero":
                 st.rerun()
 
     cols = st.columns(5)
+    # Conteo WIP del usuario activo en este proyecto
+    doing_ids_board = [int(t["id"]) for t in by_status.get("doing", [])]
+    wip_current_user = sum(
+        1 for tid in doing_ids_board
+        if any(
+            rr.get("user_id") == uid and rr.get("role") == "R"
+            for rr in (safe_execute(
+                supa_table("task_roles").select("user_id,role")
+                .eq("task_id", tid).eq("user_id", uid).eq("role", "R"),
+                default=[]
+            ) or [])
+        )
+    ) if doing_ids_board else 0
+
+    proj_row = safe_execute(
+        supa_table("projects").select("wip_limit_doing").eq("id", pid).limit(1),
+        default=[{"wip_limit_doing": 3}]
+    )
+    wip_limit_board = int((proj_row[0] if proj_row else {}).get("wip_limit_doing") or 3)
+
+    if wip_current_user >= wip_limit_board:
+        st.warning(f"⚠️ Has alcanzado tu límite WIP: **{wip_current_user}/{wip_limit_board}** tareas en curso. Completa una antes de tomar más trabajo.")
+
     labels = {
-        "todo": "Por hacer",
-        "doing": "En curso",
-        "blocked": "Bloqueadas",
-        "awaiting_approval": "En aprobación",
-        "done": "Hechas"
+        "todo": "📋 Por hacer",
+        "doing": f"🔵 En curso ({len(by_status['doing'])})",
+        "blocked": f"🔴 Bloqueadas ({len(by_status['blocked'])})",
+        "awaiting_approval": f"🟡 En aprobación ({len(by_status['awaiting_approval'])})",
+        "done": f"✅ Completadas ({len(by_status['done'])})",
     }
     for s, col in zip(labels.keys(), cols):
         with col:
@@ -1783,17 +1955,17 @@ elif menu == "Tarea (detalle)":
     st.markdown("#### SLA / tiempos")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.write(f"Start: {t.get('start_date') or '—'}")
+        st.write(f"**Inicio:** {t.get('start_date') or '—'}")
     with c2:
-        st.write(f"Target: {t.get('target_date') or '—'}")
+        st.write(f"**Objetivo (SLA):** {t.get('target_date') or '—'}")
     with c3:
-        st.write(f"Due: {t.get('due_date') or '—'}")
+        st.write(f"**Vencimiento:** {t.get('due_date') or '—'}")
     with c4:
         try:
             aging = (datetime.now() - datetime.fromisoformat(t["created_at"])).days
-            st.write(f"Aging: {aging} días")
+            st.write(f"**Antigüedad:** {aging} días")
         except Exception:
-            st.write("Aging: —")
+            st.write("**Antigüedad:** —")
 
     st.markdown("#### Responsabilidad y comunicación")
     st.write(f"Dueño: {roles['A'][0]['name'] if roles['A'] else '—'}")
@@ -2187,7 +2359,7 @@ elif menu == "Plantillas":
 # =============================================================================
 elif menu == "Export":
     uid = st.session_state["user_id"]
-    st.subheader("Export")
+    st.subheader("Exportar datos")
 
     if not has_permission(GROUP_ID, uid, "export_data"):
         st.info("No tienes permiso de export.")
@@ -2322,13 +2494,27 @@ ICS: export a calendario.
 # =============================================================================
 # Sidebar: notificaciones quick view
 # =============================================================================
-if st.sidebar.button("Ver notificaciones"):
-    rows = list_notifications(st.session_state["user_id"], limit=20)
-    st.sidebar.markdown("### Últimas notificaciones")
-    for r in rows:
-        st.sidebar.caption(f"{r['created_at']} • {r['kind']}")
-        st.sidebar.write(r["message"])
-    if st.sidebar.button("Marcar como leídas"):
-        mark_notifications_read(st.session_state["user_id"])
-        st.sidebar.success("Marcadas como leídas.")
-        st.rerun()
+if logged_in():
+    uid_notif = st.session_state["user_id"]
+    unread = unread_notifications_count(uid_notif)
+    label = f"🔔 Notificaciones ({unread} sin leer)" if unread > 0 else "🔔 Notificaciones"
+
+    if "show_notifs" not in st.session_state:
+        st.session_state["show_notifs"] = False
+
+    if st.sidebar.button(label):
+        st.session_state["show_notifs"] = not st.session_state["show_notifs"]
+
+    if st.session_state.get("show_notifs"):
+        rows = list_notifications(uid_notif, limit=20)
+        st.sidebar.markdown("### Últimas notificaciones")
+        if not rows:
+            st.sidebar.info("Sin notificaciones.")
+        for r in rows:
+            icon = "📭" if r.get("read_at") else "📬"
+            st.sidebar.caption(f"{icon} {r['created_at']} • {r['kind']}")
+            st.sidebar.write(r["message"])
+        if st.sidebar.button("Marcar todas como leídas", key="btn_mark_read"):
+            mark_notifications_read(uid_notif)
+            st.session_state["show_notifs"] = False
+            st.rerun()

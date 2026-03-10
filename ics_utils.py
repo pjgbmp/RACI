@@ -10,11 +10,18 @@ def task_to_ics_event(task_id: int, title: str, due_date_iso: str | None, descri
         return ""
     dt = due_date_iso.replace("-", "")
     uid = f"task-{task_id}@workflow"
+    # Calcular DTEND = día siguiente (requerido por Google Calendar / RFC 5545)
+    from datetime import datetime as _dt
+    dt_obj = _dt.strptime(dt, "%Y%m%d")
+    from datetime import timedelta as _td
+    dtend = (dt_obj + _td(days=1)).strftime("%Y%m%d")
+
     lines = [
         "BEGIN:VEVENT",
         f"UID:{uid}",
         f"DTSTAMP:{_dtstamp()}",
         f"DTSTART;VALUE=DATE:{dt}",
+        f"DTEND;VALUE=DATE:{dtend}",
         f"SUMMARY:{title}",
     ]
     if description:
