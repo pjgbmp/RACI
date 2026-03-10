@@ -39,7 +39,103 @@ from db import (
     update_task_due_date, update_task_status,
 )
 
-st.set_page_config(page_title="Workflow Organización de equipo", layout="wide")
+st.set_page_config(page_title="Workflow Organización de equipo", layout="wide", page_icon="📋")
+
+# ─── CSS Global ───────────────────────────────────────────────────────────────
+_ACTIVE_PAGE = None  # se actualiza abajo tras resolver `menu`
+
+_CSS = """
+<style>
+/* ── Fuentes y base ──────────────────────────────── */
+[data-testid="stAppViewContainer"] { background-color: #F7F9FC; }
+[data-testid="stSidebar"] { background-color: #1E2435 !important; }
+[data-testid="stSidebar"] * { color: #D6DCF0 !important; }
+[data-testid="stSidebar"] .stButton > button {
+    background: transparent !important;
+    color: #D6DCF0 !important;
+    border: 1px solid rgba(255,255,255,0.12) !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: rgba(99,179,237,0.18) !important;
+    border-color: #63B3ED !important;
+}
+[data-testid="stSidebar"] .stSuccess { background: rgba(72,187,120,0.15) !important; }
+
+/* ── Tarjetas de tarea ─────────────────────────── */
+[data-testid="stVerticalBlock"] > [data-testid="stVerticalBlock"] {
+    background: #FFFFFF;
+    border-radius: 10px;
+}
+
+/* ── Navegación superior — botón activo ──────────── */
+div[data-active-page="true"] > button {
+    background: linear-gradient(135deg,#4C8BF5,#3B5BDB) !important;
+    color: white !important;
+    border-color: #3B5BDB !important;
+    font-weight: 600 !important;
+    box-shadow: 0 2px 8px rgba(76,139,245,0.35) !important;
+}
+
+/* Botón nav normal */
+.stButton > button {
+    border-radius: 8px !important;
+    transition: all 0.15s ease !important;
+}
+.stButton > button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 3px 10px rgba(0,0,0,0.12);
+}
+
+/* ── Métricas ─────────────────────────────────── */
+[data-testid="metric-container"] {
+    background: #FFFFFF;
+    border: 1px solid #E8EDF5;
+    border-radius: 12px;
+    padding: 14px 18px !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+/* ── Dataframes ───────────────────────────────── */
+[data-testid="stDataFrame"] {
+    border-radius: 10px !important;
+    overflow: hidden;
+    border: 1px solid #E8EDF5;
+}
+
+/* ── Alertas ──────────────────────────────────── */
+[data-testid="stAlert"] { border-radius: 10px !important; }
+
+/* ── Divider ──────────────────────────────────── */
+hr { border-color: #E8EDF5 !important; }
+
+/* ── Forms ────────────────────────────────────── */
+[data-testid="stForm"] {
+    background: #FFFFFF;
+    border: 1px solid #E8EDF5;
+    border-radius: 12px;
+    padding: 18px !important;
+}
+
+/* ── Expander ─────────────────────────────────── */
+[data-testid="stExpander"] {
+    border: 1px solid #E8EDF5 !important;
+    border-radius: 10px !important;
+    background: #FFFFFF !important;
+}
+
+/* ── Status badges (usados con st.markdown) ──── */
+.badge-todo       { background:#E8EDF5; color:#4A5568; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.badge-doing      { background:#EBF8FF; color:#2B6CB0; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.badge-blocked    { background:#FFF5F5; color:#C53030; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.badge-approval   { background:#FFFBEB; color:#B7791F; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.badge-done       { background:#F0FFF4; color:#276749; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.badge-urgente    { background:#FFF5F5; color:#C53030; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.badge-alta       { background:#FFFBEB; color:#B7791F; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.badge-media      { background:#EBF8FF; color:#2B6CB0; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.badge-baja       { background:#F0FFF4; color:#276749; padding:3px 9px; border-radius:20px; font-size:0.82em; font-weight:600; }
+</style>
+"""
+st.markdown(_CSS, unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -118,6 +214,34 @@ def supa_table(name: str):
 def chunked(lst, n=200):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
+
+
+def _excel_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convierte columnas problemáticas para que openpyxl pueda serializarlas:
+    - Timestamps tz-aware  → string ISO 8601
+    - Nullable Int64/Float64 → int/float nativos (NaN para nulos)
+    - pd.NA → None
+    """
+    df = df.copy()
+    for col in df.columns:
+        s = df[col]
+        # Timestamps con timezone → string
+        if pd.api.types.is_datetime64_any_dtype(s):
+            try:
+                if getattr(s.dt, "tz", None) is not None:
+                    df[col] = s.dt.strftime("%Y-%m-%d %H:%M:%S").where(s.notna(), other=None)
+                else:
+                    df[col] = s.dt.strftime("%Y-%m-%d %H:%M:%S").where(s.notna(), other=None)
+            except Exception:
+                df[col] = s.astype(str).where(s.notna(), other=None)
+        # Nullable Int64 / Float64 → tipos nativos
+        elif hasattr(s, "dtype") and str(s.dtype) in ("Int64", "Int32", "Float64", "Float32"):
+            df[col] = s.to_numpy(dtype=float, na_value=float("nan"))
+        # Reemplazar pd.NA con None para que openpyxl no falle
+        else:
+            df[col] = s.where(s.notna(), other=None)
+    return df
 
 
 def safe_execute(query, default=None):
@@ -836,15 +960,30 @@ def approvals_kpi_by_accountable(group_id: int, project_id: int | None = None) -
         return pd.DataFrame(columns=["a_user_id", "full_name", "pending_count", "avg_cycle_hours_pending", "avg_cycle_hours_approved_60d"])
 
     df = df.rename(columns={"accountable_user_id": "a_user_id"})
-    df["requested_at_dt"] = df["requested_at"].apply(_to_dt)
-    df["decided_at_dt"] = df["decided_at"].apply(_to_dt)
+    # utc=True garantiza tz-aware en TODAS las filas, evitando TypeError en restas
+    df["requested_at_dt"] = pd.to_datetime(df["requested_at"], errors="coerce", utc=True)
+    df["decided_at_dt"]   = pd.to_datetime(df["decided_at"],   errors="coerce", utc=True)
     now = pd.Timestamp.now(tz="UTC")
 
-    df["cycle_hours"] = None
     pending = df["status"] == "pending"
-    df.loc[pending, "cycle_hours"] = (now - df.loc[pending, "requested_at_dt"]).dt.total_seconds() / 3600
     decided = ~pending
-    df.loc[decided, "cycle_hours"] = (df.loc[decided, "decided_at_dt"] - df.loc[decided, "requested_at_dt"]).dt.total_seconds() / 3600
+
+    # Pendientes: now - requested_at
+    req_pend = df.loc[pending, "requested_at_dt"]
+    valid_pend = req_pend.notna()
+    df.loc[pending & df.index.isin(req_pend[valid_pend].index), "cycle_hours"] = (
+        (now - req_pend[valid_pend]).dt.total_seconds() / 3600
+    )
+
+    # Decididas: decided_at - requested_at (solo filas donde ambas son válidas)
+    req_dec = df.loc[decided, "requested_at_dt"]
+    dec_dec = df.loc[decided, "decided_at_dt"]
+    both_valid = decided & df["requested_at_dt"].notna() & df["decided_at_dt"].notna()
+    if both_valid.any():
+        df.loc[both_valid, "cycle_hours"] = (
+            (df.loc[both_valid, "decided_at_dt"] - df.loc[both_valid, "requested_at_dt"])
+            .dt.total_seconds() / 3600
+        )
 
     pend = (df[pending].groupby(["a_user_id", "full_name"])
             .agg(pendientes_count=("task_id", "count"),
@@ -871,10 +1010,18 @@ def approvals_kpi_by_accountable(group_id: int, project_id: int | None = None) -
 st.sidebar.title("Acceso")
 
 if not logged_in():
-    email = st.sidebar.text_input("Email")
-    p = st.sidebar.text_input("Contraseña", type="password")
+    st.sidebar.markdown(
+        '<div style="text-align:center;padding:18px 0 10px;">'
+        '<div style="font-size:2rem">📋</div>'
+        '<div style="font-size:1.1rem;font-weight:700;color:#D6DCF0">Workflow Manager</div>'
+        '<div style="font-size:0.78rem;color:#8A9BC0;margin-top:4px">Inicia sesión para continuar</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    email = st.sidebar.text_input("📧 Email")
+    p = st.sidebar.text_input("🔐 Contraseña", type="password")
 
-    if st.sidebar.button("Entrar"):
+    if st.sidebar.button("Entrar →", use_container_width=True, type="primary"):
         try:
             res = sign_in(email.strip(), p)
 
@@ -912,9 +1059,20 @@ if not logged_in():
 
     st.stop()
 
-# Logged in
-st.sidebar.success(st.session_state.get("full_name", "Usuario"))
-if st.sidebar.button("Cerrar sesión"):
+# Logged in — avatar + nombre
+_fn = st.session_state.get("full_name") or "Usuario"
+_un = st.session_state.get("username") or ""
+_initials = "".join(w[0].upper() for w in _fn.split()[:2]) or "U"
+st.sidebar.markdown(
+    f'<div style="display:flex;align-items:center;gap:10px;padding:10px 0 14px;">'
+    f'<div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#4C8BF5,#3B5BDB);'
+    f'display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:1rem">{_initials}</div>'
+    f'<div><div style="font-weight:600;font-size:0.95rem">{_fn}</div>'
+    f'<div style="font-size:0.78rem;opacity:0.65">@{_un}</div></div>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
+if st.sidebar.button("🚪 Cerrar sesión", use_container_width=True):
     sign_out()
     for k in [
         "user_id", "username", "full_name", "active_group_id", "selected_task_id", "is_global_admin",
@@ -989,11 +1147,17 @@ GROUP_ID = int(st.session_state["active_group_id"])
 # =============================================================================
 # Header + navegación
 # =============================================================================
-st.title("Workflow Organización de Equipo")
-
 unread = unread_notifications_count(st.session_state["user_id"])
-badge = f" ({unread})" if unread > 0 else ""
-st.caption(f"🔔 Notificaciones sin leer{badge}" if unread > 0 else "🔔 Sin notificaciones nuevas")
+_notif_badge = f'<span style="background:#E53935;color:white;border-radius:20px;padding:2px 8px;font-size:0.78em;font-weight:700;margin-left:6px">{unread}</span>' if unread > 0 else ""
+st.markdown(
+    f'<div style="display:flex;align-items:center;justify-content:space-between;'
+    f'background:linear-gradient(135deg,#1E2435 0%,#2D3A5F 100%);'
+    f'padding:16px 24px;border-radius:14px;margin-bottom:12px;">'
+    f'<span style="color:white;font-size:1.6rem;font-weight:700">📋 Workflow · Organización de Equipo</span>'
+    f'<span style="color:#A0B0D0;font-size:0.9rem">🔔 Notificaciones{_notif_badge}</span>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
 
 PAGES = ["Resumen", "Proyectos", "Tablero", "Tarea (detalle)", "Plantillas", "Export", "Gobernanza", "Reportes", "Ayuda"]
 if st.session_state.get("is_global_admin"):
@@ -1002,10 +1166,33 @@ if st.session_state.get("is_global_admin"):
 if st.session_state.get("menu") == "Admin" and not st.session_state.get("is_global_admin"):
     st.session_state["menu"] = "Resumen"
 
+# Inyectar CSS para el botón activo (el botón cuyo label == menu actual)
+_active = st.session_state.get("menu", "Resumen")
+_active_css = "".join([
+    f"""<style>
+    button[kind="secondary"][data-testid$="topnav_{pg.replace(' ','_').replace('(','').replace(')','')}"]:not([disabled]),
+    div.stButton > button[aria-label="{pg}"]
+    {{ background: linear-gradient(135deg,#4C8BF5,#3B5BDB) !important;
+       color: white !important; font-weight: 700 !important;
+       box-shadow: 0 2px 8px rgba(76,139,245,0.4) !important; }}
+    </style>"""
+    for pg in PAGES if pg == _active
+])
+st.markdown(_active_css, unsafe_allow_html=True)
+
+ICONS = {
+    "Resumen": "📊", "Proyectos": "📁", "Tablero": "📌",
+    "Tarea (detalle)": "🔍", "Plantillas": "📋", "Export": "📤",
+    "Gobernanza": "⚖️", "Reportes": "📈", "Ayuda": "❓", "Admin": "🛡️",
+}
 nav_cols = st.columns(len(PAGES))
 for i, page in enumerate(PAGES):
     with nav_cols[i]:
-        if st.button(page, key=f"topnav_{page}", use_container_width=True):
+        icon = ICONS.get(page, "")
+        label = f"{icon} {page}" if icon else page
+        is_active = (page == _active)
+        btn_type = "primary" if is_active else "secondary"
+        if st.button(label, key=f"topnav_{page}", use_container_width=True, type=btn_type):
             set_menu(page)
 
 sidebar_idx = PAGES.index(st.session_state["menu"]) if st.session_state["menu"] in PAGES else 0
@@ -1267,12 +1454,22 @@ if menu == "Admin":
     st.stop()
 
 
+# Helper para encabezados de página
+def _page_header(icon: str, title: str, subtitle: str = "", color: str = "#4C8BF5"):
+    st.markdown(
+        f'<div style="border-left:4px solid {color};padding:6px 0 6px 14px;margin-bottom:18px;">'
+        f'<div style="font-size:1.45rem;font-weight:700">{icon} {title}</div>'
+        + (f'<div style="color:#718096;font-size:0.88rem;margin-top:2px">{subtitle}</div>' if subtitle else "")
+        + f'</div>',
+        unsafe_allow_html=True,
+    )
+
 # =============================================================================
 # RESUMEN
 # =============================================================================
 if menu == "Resumen":
     uid = st.session_state["user_id"]
-    st.subheader("Resumen de trabajo (qué hay por hacer)")
+    _page_header("📊", "Resumen", "Vista general de trabajo, KPIs y riesgos", "#4C8BF5")
 
     st.markdown("### Vista general de tareas (filtros por RACI y fechas)")
 
@@ -1556,8 +1753,7 @@ if menu == "Resumen":
 elif menu == "Proyectos":
     uid = st.session_state["user_id"]
     is_leader = (user_role_in_group(GROUP_ID, uid) == "leader")
-
-    st.subheader("Proyectos del grupo")
+    _page_header("📁", "Proyectos", "Gestión de proyectos y miembros", "#38B2AC")
     projs = list_projects(GROUP_ID)
     st.dataframe(pd.DataFrame(projs) if projs else pd.DataFrame(), use_container_width=True)
 
@@ -1673,8 +1869,7 @@ elif menu == "Tablero":
     if not proj:
         st.stop()
     pid = int(proj["id"])
-
-    st.subheader("Tablero (Kanban) + filtros avanzados")
+    _page_header("📌", "Tablero Kanban", f"Proyecto: {proj['name']}", "#805AD5")
 
     # tags
     tags = getattr(supa_table("tags").select("*").eq("group_id", GROUP_ID).execute(), "data", []) or []
@@ -1712,11 +1907,26 @@ elif menu == "Tablero":
     for t in tasks:
         by_status[t["status"]].append(t)
 
+    _STATUS_BADGE = {
+        "todo": "badge-todo", "doing": "badge-doing",
+        "blocked": "badge-blocked", "awaiting_approval": "badge-approval", "done": "badge-done",
+    }
+    _PRIO_BADGE = {
+        "urgente": "badge-urgente", "alta": "badge-alta",
+        "media": "badge-media", "baja": "badge-baja",
+    }
+    _STATUS_LABEL = {
+        "todo": "Por hacer", "doing": "En curso", "blocked": "Bloqueada",
+        "awaiting_approval": "En aprobación", "done": "Completada",
+    }
+
     def render_task_card(t):
         roles = get_task_roles(int(t["id"]))
         A = roles["A"][0]["name"] if roles["A"] else "—"
         Rs = ", ".join([x["name"] for x in roles["R"]]) if roles["R"] else "—"
         due = t.get("due_date") or "—"
+        status = t.get("status", "todo")
+        prio = t.get("priority", "media")
 
         deps = list_task_dependencies_open(int(t["id"]))
         aging_days = None
@@ -1726,15 +1936,27 @@ elif menu == "Tablero":
         except Exception:
             pass
 
-        with st.container(border=True):
-            st.caption(f"#{t['id']} • {t['priority']} • vence {due} • antigüedad {aging_days}d" if aging_days is not None else f"#{t['id']} • {t['priority']} • vence {due}")
-            st.write(t["title"])
-            st.caption(f"Dueño: {A}")
-            st.caption(f"Ejecutores: {Rs}")
-            if deps:
-                st.warning(f"Dependencias pendientes: {len(deps)}")
+        # Color de borde según prioridad
+        _border_colors = {"urgente": "#FC8181", "alta": "#F6AD55", "media": "#63B3ED", "baja": "#68D391"}
+        border_c = _border_colors.get(prio, "#CBD5E0")
 
-            if st.button("Abrir detalle", key=f"open_{t['id']}"):
+        with st.container(border=True):
+            sbadge = _STATUS_BADGE.get(status, "badge-todo")
+            slabel = _STATUS_LABEL.get(status, status)
+            pbadge = _PRIO_BADGE.get(prio, "badge-media")
+            st.markdown(
+                f'<span class="{pbadge}">{prio.upper()}</span>&nbsp;&nbsp;'
+                f'<span style="color:#718096;font-size:0.82em">#{t["id"]} · vence {due}'
+                + (f' · {aging_days}d' if aging_days is not None else "")
+                + f'</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"**{t['title']}**")
+            st.caption(f"👤 Dueño: {A}  •  🔧 Ejecutores: {Rs}")
+            if deps:
+                st.markdown(f'<span class="badge-blocked">⛔ {len(deps)} dependencia(s) pendiente(s)</span>', unsafe_allow_html=True)
+
+            if st.button("Abrir →", key=f"open_{t['id']}", use_container_width=True):
                 st.session_state["selected_task_id"] = int(t["id"])
                 st.session_state["menu"] = "Tarea (detalle)"
                 st.rerun()
@@ -1763,6 +1985,14 @@ elif menu == "Tablero":
     if wip_current_user >= wip_limit_board:
         st.warning(f"⚠️ Has alcanzado tu límite WIP: **{wip_current_user}/{wip_limit_board}** tareas en curso. Completa una antes de tomar más trabajo.")
 
+    _COL_COLORS = {
+        "todo": "#F7F9FC", "doing": "#EBF8FF",
+        "blocked": "#FFF5F5", "awaiting_approval": "#FFFBEB", "done": "#F0FFF4",
+    }
+    _COL_BORDER = {
+        "todo": "#CBD5E0", "doing": "#63B3ED",
+        "blocked": "#FC8181", "awaiting_approval": "#F6AD55", "done": "#68D391",
+    }
     labels = {
         "todo": "📋 Por hacer",
         "doing": f"🔵 En curso ({len(by_status['doing'])})",
@@ -1772,7 +2002,14 @@ elif menu == "Tablero":
     }
     for s, col in zip(labels.keys(), cols):
         with col:
-            st.markdown(f"### {labels[s]}")
+            bg = _COL_COLORS.get(s, "#F7F9FC")
+            brd = _COL_BORDER.get(s, "#CBD5E0")
+            st.markdown(
+                f'<div style="background:{bg};border-top:3px solid {brd};'
+                f'border-radius:10px 10px 0 0;padding:8px 12px;margin-bottom:6px;">'
+                f'<strong>{labels[s]}</strong></div>',
+                unsafe_allow_html=True,
+            )
             for t in by_status[s]:
                 render_task_card(t)
 
@@ -1904,7 +2141,7 @@ elif menu == "Tablero":
 # =============================================================================
 elif menu == "Tarea (detalle)":
     uid = st.session_state["user_id"]
-    st.subheader("Detalle de tarea")
+    _page_header("🔍", "Detalle de tarea", "Responsabilidades, avances y aprobaciones", "#DD6B20")
 
     pmap = _project_map(GROUP_ID)
     projs = [{"id": pid, "name": p["name"]} for pid, p in pmap.items()]
@@ -2242,7 +2479,7 @@ elif menu == "Tarea (detalle)":
 # =============================================================================
 elif menu == "Plantillas":
     uid = st.session_state["user_id"]
-    st.subheader("Plantillas de proyecto")
+    _page_header("📋", "Plantillas", "Reutiliza estructuras de proyecto", "#2F855A")
 
     if not has_permission(GROUP_ID, uid, "template_manage"):
         st.info("No tienes permiso para gestionar plantillas.")
@@ -2359,7 +2596,7 @@ elif menu == "Plantillas":
 # =============================================================================
 elif menu == "Export":
     uid = st.session_state["user_id"]
-    st.subheader("Exportar datos")
+    _page_header("📤", "Exportar datos", "CSV, Excel e ICS para calendario", "#2B6CB0")
 
     if not has_permission(GROUP_ID, uid, "export_data"):
         st.info("No tienes permiso de export.")
@@ -2381,8 +2618,8 @@ elif menu == "Export":
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="tasks")
-    st.download_button("Descargar Excel", data=buf.getvalue(), file_name=f"tasks_project_{pid}.xlsx")
+        _excel_safe(df).to_excel(writer, index=False, sheet_name="Tareas")
+    st.download_button("Descargar Excel", data=buf.getvalue(), file_name=f"tareas_proyecto_{pid}.xlsx")
 
     events = []
     for r in rows:
@@ -2396,7 +2633,7 @@ elif menu == "Export":
 # =============================================================================
 elif menu == "Gobernanza":
     uid = st.session_state["user_id"]
-    st.subheader("Gobernanza del grupo")
+    _page_header("⚖️", "Gobernanza", "Permisos y reglas del grupo", "#744210")
 
     role = user_role_in_group(GROUP_ID, uid)
     if role != "leader":
@@ -2429,7 +2666,7 @@ elif menu == "Gobernanza":
 # REPORTES
 # =============================================================================
 elif menu == "Reportes":
-    st.subheader("Reporte semanal")
+    _page_header("📈", "Reportes", "Reporte semanal de tareas completadas y pendientes", "#1A365D")
 
     pmap = _project_map(GROUP_ID)
     projs = [{"id": None, "name": "Todos"}] + [{"id": pid, "name": p["name"]} for pid, p in pmap.items()]
@@ -2451,16 +2688,16 @@ elif menu == "Reportes":
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df_done.to_excel(writer, index=False, sheet_name="done")
-        df_pending.to_excel(writer, index=False, sheet_name="pending")
-    st.download_button("Descargar Excel del reporte", data=buf.getvalue(), file_name=f"weekly_report_{ws.isoformat()}.xlsx")
+        _excel_safe(df_done).to_excel(writer, index=False, sheet_name="Completadas")
+        _excel_safe(df_pending).to_excel(writer, index=False, sheet_name="Pendientes")
+    st.download_button("Descargar Excel del reporte", data=buf.getvalue(), file_name=f"reporte_semanal_{ws.isoformat()}.xlsx")
 
 
 # =============================================================================
 # AYUDA
 # =============================================================================
 elif menu == "Ayuda":
-    st.subheader("Guía rápida: cómo usar el sistema")
+    _page_header("❓", "Ayuda", "Guía rápida de uso del sistema", "#553C9A")
     st.markdown("""
 ### Objetivo
 Esta herramienta organiza proyectos y tareas por grupo, con control de responsabilidades, trazabilidad y gobernanza.
