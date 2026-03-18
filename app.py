@@ -3374,20 +3374,20 @@ El sistema genera notificaciones automáticas en estos eventos:
 - Requiere que los usuarios tengan email en su perfil y que el sistema de envío (outbound_queue) esté activo.
 """)
 
-    with st.expander("🛡️ Admin Global", expanded=False):
-        st.markdown("""
+    #with st.expander("🛡️ Admin Global", expanded=False):
+        #st.markdown("""
 ### ¿Quién tiene acceso?
-Solo usuarios con el campo `is_global_admin = true` en su perfil de Supabase.
-El menú "Admin" solo aparece si eres administrador global.
+#Solo usuarios con el campo `is_global_admin = true` en su perfil de Supabase.
+#El menú "Admin" solo aparece si eres administrador global.
 
 ### ¿Qué puedes hacer?
-- **Ver todos los grupos** del sistema con sus metadatos.
-- **Ver miembros** de cualquier grupo con sus roles, nombres y emails.
-- **Ver proyectos** de cualquier grupo.
-- **Ver tareas** de cualquier proyecto (últimas 500).
+#- **Ver todos los grupos** del sistema con sus metadatos.
+#- **Ver miembros** de cualquier grupo con sus roles, nombres y emails.
+#- **Ver proyectos** de cualquier grupo.
+#- **Ver tareas** de cualquier proyecto (últimas 500).
 
-> Este panel es de solo lectura para auditoría. Los cambios se hacen desde las secciones correspondientes.
-""")
+#> Este panel es de solo lectura para auditoría. Los cambios se hacen desde las secciones correspondientes.
+#""")
 
     # ─── PREGUNTAS FRECUENTES ─────────────────────────────────────────────────
     st.divider()
