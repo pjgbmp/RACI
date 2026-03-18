@@ -51,15 +51,47 @@ _CSS = """
 [data-testid="stSidebar"] { background-color: #1E2435 !important; }
 [data-testid="stSidebar"] * { color: #D6DCF0 !important; }
 [data-testid="stSidebar"] .stButton > button {
-    background: transparent !important;
-    color: #D6DCF0 !important;
-    border: 1px solid rgba(255,255,255,0.12) !important;
+    background: rgba(255,255,255,0.08) !important;
+    color: #E8EDF8 !important;
+    border: 1px solid rgba(255,255,255,0.18) !important;
+    font-weight: 500 !important;
 }
 [data-testid="stSidebar"] .stButton > button:hover {
-    background: rgba(99,179,237,0.18) !important;
+    background: rgba(99,179,237,0.28) !important;
     border-color: #63B3ED !important;
+    color: #ffffff !important;
 }
-[data-testid="stSidebar"] .stSuccess { background: rgba(72,187,120,0.15) !important; }
+[data-testid="stSidebar"] .stSuccess { background: rgba(72,187,120,0.2) !important; }
+/* inputs y selects en sidebar legibles */
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] select,
+[data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] [data-baseweb="select"] {
+    background: rgba(255,255,255,0.10) !important;
+    color: #E8EDF8 !important;
+    border-color: rgba(255,255,255,0.22) !important;
+}
+[data-testid="stSidebar"] label { color: #B8C8E8 !important; font-weight: 500 !important; }
+[data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] small { color: #8A9BC8 !important; }
+[data-testid="stSidebar"] [data-testid="stExpander"] {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(255,255,255,0.12) !important;
+    border-radius: 10px !important;
+}
+/* código de grupo destacado */
+.sidebar-group-code {
+    background: rgba(76,139,245,0.20);
+    border: 1px solid rgba(76,139,245,0.45);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 6px 0 10px;
+    font-family: monospace;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #90C0FF !important;
+    letter-spacing: 0.12em;
+    text-align: center;
+}
 
 /* ── Tarjetas de tarea ─────────────────────────── */
 [data-testid="stVerticalBlock"] > [data-testid="stVerticalBlock"] {
@@ -1108,6 +1140,26 @@ if my_groups:
     st.session_state["active_group_id"] = int(active["id"])
 else:
     st.sidebar.info("No perteneces a ningún grupo aún.")
+
+# ── Mostrar código del grupo activo en sidebar ──────────────────────────────
+if st.session_state.get("active_group_id"):
+    _active_g = next((g for g in my_groups if int(g["id"]) == int(st.session_state["active_group_id"])), None)
+    if _active_g:
+        _gname = _active_g.get("name", "")
+        _grole = _active_g.get("my_role", "")
+        _gcode_row = getattr(
+            supa_table("groups").select("join_code").eq("id", int(st.session_state["active_group_id"])).limit(1).execute(),
+            "data", []
+        ) or []
+        _gcode = (_gcode_row[0] or {}).get("join_code", "—") if _gcode_row else "—"
+        st.sidebar.markdown(
+            f'<div style="padding:4px 0 2px;color:#8A9BC8;font-size:0.78rem;font-weight:600;letter-spacing:0.04em">GRUPO ACTIVO</div>'
+            f'<div style="font-weight:700;color:#D6DCF0;font-size:0.95rem;margin-bottom:2px">{_gname}</div>'
+            f'<div style="font-size:0.78rem;color:#8A9BC8;margin-bottom:6px">Rol: {_grole}</div>'
+            f'<div style="color:#8A9BC8;font-size:0.72rem;margin-bottom:2px">🔑 Código de acceso</div>'
+            f'<div class="sidebar-group-code">{_gcode}</div>',
+            unsafe_allow_html=True,
+        )
 
 with st.sidebar.expander("➕ Crear grupo"):
     gname = st.text_input("Nombre del grupo", key="gname")
@@ -2186,8 +2238,37 @@ elif menu == "Tarea (detalle)":
     st.write(t.get("description") or "")
 
     if deps:
-        st.warning("Esta tarea tiene dependencias pendientes. Debe completarse primero:")
-        st.dataframe(pd.DataFrame(deps), use_container_width=True)
+        st.markdown(
+            '<div style="background:#FFF5F5;border-left:4px solid #FC8181;border-radius:8px;padding:10px 14px;margin-bottom:10px;">'
+            '<strong>⛔ Esta tarea tiene dependencias pendientes que deben completarse primero</strong>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        for dep in deps:
+            dep_id = int(dep["id"])
+            dep_roles = get_task_roles(dep_id)
+            dep_A = dep_roles["A"][0]["name"] if dep_roles.get("A") else "—"
+            dep_Rs = ", ".join([x["name"] for x in dep_roles["R"]]) if dep_roles.get("R") else "—"
+            _dep_status_color = {
+                "todo": "#718096", "doing": "#2B6CB0", "blocked": "#C53030",
+                "awaiting_approval": "#B7791F", "done": "#276749",
+            }.get(dep.get("status", "todo"), "#718096")
+            st.markdown(
+                f'<div style="background:#FFFAFA;border:1px solid #FEB2B2;border-radius:8px;padding:10px 14px;margin-bottom:8px;">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+                f'<span style="font-weight:700;color:#2D3748">#{dep_id} — {dep.get("title","(sin título)")}</span>'
+                f'<span style="background:{_dep_status_color};color:white;border-radius:12px;padding:2px 10px;font-size:0.78rem;font-weight:600">'
+                f'{dep.get("status","—")}</span></div>'
+                f'<div style="margin-top:6px;font-size:0.85rem;color:#4A5568">'
+                f'👤 <strong>Dueño (A):</strong> {dep_A}&nbsp;&nbsp;|&nbsp;&nbsp;'
+                f'🔧 <strong>Ejecutor(es) (R):</strong> {dep_Rs}'
+                f'</div>'
+                f'<div style="margin-top:4px;font-size:0.8rem;color:#718096">'
+                f'📅 Vence: {dep.get("due_date") or "—"}&nbsp;&nbsp;·&nbsp;&nbsp;Prioridad: {dep.get("priority","—")}'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown("#### SLA / tiempos")
     c1, c2, c3, c4 = st.columns(4)
@@ -2697,35 +2778,445 @@ elif menu == "Reportes":
 # AYUDA
 # =============================================================================
 elif menu == "Ayuda":
-    _page_header("❓", "Ayuda", "Guía rápida de uso del sistema", "#553C9A")
+    _page_header("❓", "Ayuda", "Guía completa de usuario + Preguntas Frecuentes", "#553C9A")
+
     st.markdown("""
-### Objetivo
-Esta herramienta organiza proyectos y tareas por grupo, con control de responsabilidades, trazabilidad y gobernanza.
+## 📖 Guía Completa de Usuario — Workflow Manager
+
+Esta plataforma te permite organizar el trabajo de tu equipo por grupos y proyectos, con control explícito de quién hace qué (RACI), trazabilidad total de cambios, aprobaciones, dependencias entre tareas y métricas de desempeño.
 
 ---
-
-## Glosario
-
-RACI:
-- R: ejecuta
-- A: dueño final / aprueba
-- C: consultado
-- I: informado
-
-DoD: Definition of Done. Criterio de aceptación.  
-WIP: Límite de tareas en DOING por persona.  
-SLA: objetivo de tiempo (target_date).  
-Aging: días desde creación de tarea.  
-ICS: export a calendario.
-
----
-
-## Reglas
-- 1 solo Dueño (A) por tarea.
-- mínimo 1 Ejecutor (R).
-- Si hay dependencias pendientes, no se deja cerrar/avanzar.
-- Si requiere aprobación, no se cierra sin decisión del Dueño.
 """)
+
+    with st.expander("📚 Glosario de términos", expanded=False):
+        st.markdown("""
+| Término | Significado |
+|---|---|
+| **RACI** | Marco de responsabilidades: R=Ejecutor, A=Dueño, C=Consultado, I=Informado |
+| **R (Responsible)** | Persona(s) que ejecutan la tarea. Puede haber varios. Ellos cambian el estado. |
+| **A (Accountable)** | Dueño único y final. Aprueba el cierre si la tarea requiere aprobación. |
+| **C (Consulted)** | Son consultados durante la ejecución. Reciben notificación al crearse la tarea. |
+| **I (Informed)** | Solo se les informa del estado. Notificados en cambios relevantes. |
+| **DoD** | *Definition of Done* — Criterio explícito de aceptación. Toda tarea debe tenerlo. |
+| **WIP** | *Work In Progress* — Límite máximo de tareas en estado "En curso" por persona. |
+| **SLA / Target date** | Fecha objetivo interna de entrega (no es el deadline, es la meta interna). |
+| **Due date** | Fecha límite real (deadline). Superarla marca la tarea como vencida. |
+| **Aging** | Días transcurridos desde que se creó la tarea. Mide cuánto lleva abierta. |
+| **Lead time** | Días desde creación hasta cierre. Mide eficiencia real de entrega. |
+| **ICS** | Formato estándar de calendario. Permite importar tareas a Google Calendar, Outlook, etc. |
+| **Join code** | Código único del grupo. Compártelo para que otros se unan. Visible en el panel izquierdo. |
+""")
+
+    with st.expander("🔐 Inicio de sesión y perfil", expanded=False):
+        st.markdown("""
+### Cómo iniciar sesión
+1. Ingresa tu **correo electrónico** y **contraseña** en el panel izquierdo.
+2. Haz clic en **Entrar →**.
+3. Si es tu primera vez, el sistema crea automáticamente un perfil básico con tu email.
+
+### Cerrar sesión
+- Haz clic en **🚪 Cerrar sesión** en el panel izquierdo. Esto limpia tu sesión completamente.
+
+### Tu nombre e iniciales
+- En la parte superior del panel izquierdo verás tu **avatar** (iniciales en círculo azul) y tu nombre completo y usuario.
+- Para cambiar tu nombre o username, un administrador del sistema debe actualizar tu perfil en la tabla `user_profiles` de Supabase.
+""")
+
+    with st.expander("👥 Grupos", expanded=False):
+        st.markdown("""
+### ¿Qué es un grupo?
+Un grupo es la unidad base de trabajo. Todo —proyectos, tareas, permisos, miembros— vive dentro de un grupo.
+
+### Crear un grupo
+1. En el panel izquierdo, despliega **➕ Crear grupo**.
+2. Escribe un nombre y presiona **Crear grupo**.
+3. Automáticamente recibirás el rol de **Líder** y se generará un **Código de acceso** único.
+4. El código aparece en el panel izquierdo bajo "Código de acceso" para que lo compartas.
+
+### Unirme a un grupo existente
+1. Despliega **🔑 Unirme a un grupo** en el panel izquierdo.
+2. Ingresa el **código de acceso** que te compartió el líder.
+3. Presiona **Unirme**. Quedarás como miembro del grupo.
+
+### Código de acceso del grupo
+- Siempre visible en el panel izquierdo una vez que tienes un grupo activo.
+- Compártelo con tu equipo para que puedan unirse.
+
+### Cambiar grupo activo
+- Si perteneces a varios grupos, usa el **selector de grupo** en el panel izquierdo para cambiar de contexto. Todo el contenido (proyectos, tareas, KPIs) cambiará al grupo seleccionado.
+
+### Transferir liderazgo
+- Los líderes pueden transferir el liderazgo a otro miembro desde la pestaña **Proyectos** → sección "Miembros del grupo y liderazgo".
+
+### Roles en el grupo
+| Rol | Capacidades |
+|---|---|
+| **Líder** | Crea/edita proyectos, gestiona miembros, cambia gobernanza, accede a todo |
+| **Miembro** | Ejecuta tareas, comenta, ve reportes según permisos asignados |
+""")
+
+    with st.expander("📊 Resumen (Dashboard)", expanded=False):
+        st.markdown("""
+### ¿Qué muestra esta sección?
+El Resumen es tu panel de control principal. Tiene cuatro bloques:
+
+#### 1. Vista general de tareas
+- Tabla filtrable con **todas las tareas** del grupo o proyecto seleccionado.
+- **Filtros disponibles:** Proyecto, Persona (por rol RACI), Rol RACI (A/R/C/I), Estado (todo/doing/blocked/awaiting_approval/done), Ventana de fechas (próximos 7, 14, 30 días o rango personalizado), Campo de fecha a filtrar (due_date, target_date, start_date).
+- Las columnas incluyen: proyecto, estado, prioridad, fechas, y las cuatro columnas RACI (A/R/C/I) con nombres de personas.
+
+#### 2. Resumen por RACI (personal)
+- Muestra **tus tareas divididas por rol**: qué tareas ejecutas (R), cuáles debes aprobar (A), cuáles te consultan (C), y cuáles solo te informan (I).
+- Ordenadas por prioridad y fecha de vencimiento.
+
+#### 3. Riesgos y control
+- **Vencidas:** Tareas abiertas cuya fecha de vencimiento ya pasó.
+- **Bloqueadas:** Tareas en estado `blocked` con su motivo.
+
+#### 4. KPIs por persona
+- Tabla de métricas por cada miembro del grupo:
+  - `por_hacer`: tareas pendientes de iniciar
+  - `en_curso`: tareas activas (WIP)
+  - `bloqueadas`: tareas bloqueadas
+  - `en_aprobacion`: esperando decisión del dueño
+  - `completadas`: tareas cerradas
+  - `wip_en_curso`: cantidad actual en doing (comparado con límite WIP)
+  - `vencidas_abiertas`: tareas con due_date vencido y aún sin cerrar
+  - `antiguedad_prom_dias`: promedio de días que llevan abiertas las tareas del usuario
+  - `tiempo_cierre_prom_60d`: promedio de días desde creación hasta cierre (últimos 60 días)
+  - `tasa_cumplimiento_pct`: % de tareas cerradas antes de su due_date
+- Gráfico de barras comparativo de WIP vs. vencidas.
+- **Alerta WIP:** Si algún miembro alcanzó su límite, aparece un aviso en amarillo.
+
+#### Ciclo de aprobación
+- KPIs por dueño (A): cuántas aprobaciones tiene pendientes y cuántas horas tarda en promedio en decidir.
+""")
+
+    with st.expander("📁 Proyectos", expanded=False):
+        st.markdown("""
+### Ver proyectos del grupo
+- La tabla superior muestra todos los proyectos del grupo con sus metadatos.
+
+### Crear un proyecto
+Requiere permiso `project_create` (los líderes siempre lo tienen):
+1. Ve a la sección "Crear proyecto" al final de la pestaña.
+2. Ingresa **nombre**, **descripción** (opcional) y el **límite WIP** (máximo de tareas en curso por ejecutor, por defecto 3).
+3. Presiona **Crear**. El proyecto se crea y eres añadido automáticamente como miembro.
+
+### Gestionar miembros del proyecto
+- Selecciona el proyecto en el selector.
+- La tabla "Miembros actuales" muestra quiénes tienen acceso.
+- **Agregar miembros:** Selecciona personas del grupo y presiona "Agregar al proyecto". Solo miembros del proyecto pueden ser asignados como R/A/C/I en sus tareas.
+- **Remover miembros:** Selecciona y presiona "Remover del proyecto". No se puede dejar el proyecto sin miembros.
+
+### Miembros del grupo y liderazgo
+- Lista todos los miembros del grupo con su rol.
+- **Transferir liderazgo:** (Solo líderes con permiso `group_transfer_lead`) — Selecciona otro miembro y presiona "Hacer líder".
+- **Código del grupo:** Visible para líderes con permiso `group_manage_members`.
+""")
+
+    with st.expander("📌 Tablero Kanban", expanded=False):
+        st.markdown("""
+### Estructura del tablero
+El tablero muestra las tareas del proyecto en **5 columnas** según estado:
+- 📋 **Por hacer** (todo) — Tarea creada, sin iniciar
+- 🔵 **En curso** (doing) — En ejecución activa
+- 🔴 **Bloqueadas** (blocked) — Detenida por algún impedimento
+- 🟡 **En aprobación** (awaiting_approval) — Esperando que el dueño (A) apruebe el cierre
+- ✅ **Completadas** (done) — Cerradas
+
+### Filtros del tablero
+- **Búsqueda global:** Filtra por texto en título, descripción o DoD.
+- **Estado:** Selecciona uno o varios estados a mostrar.
+- **Prioridad:** Filtra por urgente/alta/media/baja.
+- **Solo donde soy R/A:** Muestra únicamente tareas donde participas como ejecutor o dueño.
+- **Tags/componentes:** Filtra por etiquetas o componentes asignados.
+- **Solo vencidas / Solo bloqueadas:** Filtros rápidos para issues urgentes.
+
+### Tarjetas de tarea
+Cada tarjeta muestra:
+- Badge de **prioridad** (color) y número de tarea
+- **Fecha de vencimiento** y **antigüedad** en días
+- **Título** en negrita
+- **Dueño (A)** y **Ejecutores (R)**
+- Aviso si tiene **dependencias pendientes**
+- Botón **Abrir →** que lleva al detalle completo
+
+### Alerta WIP
+Si llevas más tareas en curso de las permitidas, aparece un aviso en la parte superior del tablero antes de ver las columnas.
+
+### Crear tarea
+Al final de la pestaña de Tablero, si tienes permiso `task_create`:
+1. Completa: Título (obligatorio), Descripción, **DoD** (obligatorio), Prioridad, Fechas (start, target, due).
+2. Define si **requiere aprobación** del dueño para cerrarse.
+3. Asigna **RACI**: Dueño único (A), uno o más Ejecutores (R), Consultados (C), Informados (I).
+4. Agrega **tags** (etiquetas libres) y **componente** (categoría técnica).
+5. Define **dependencias**: tareas que deben completarse antes de que ésta pueda avanzar.
+6. Opcionalmente marca "Enviar correo" para notificar a A y R por email.
+7. Presiona **Crear tarea**.
+""")
+
+    with st.expander("🔍 Tarea (detalle)", expanded=False):
+        st.markdown("""
+### Cómo acceder
+- Presiona **Abrir →** en cualquier tarjeta del Tablero, o navega directamente a la pestaña "Tarea (detalle)" y selecciona proyecto y tarea.
+
+### Información mostrada
+- **DoD:** El criterio exacto de aceptación de la tarea.
+- **Descripción:** Contexto adicional.
+- **Dependencias:** Si tiene tareas bloqueantes pendientes, se listan con su dueño (A) y ejecutores (R), estado, prioridad y fecha de vencimiento.
+- **SLA / Tiempos:** Fecha de inicio, objetivo SLA (target), vencimiento (due) y antigüedad en días.
+- **Responsabilidad RACI:** Nombres de A, R, C e I.
+
+### Acciones disponibles
+
+#### Cambiar fecha de vencimiento (due date)
+- Disponible si tienes permiso `task_change_due_date` Y eres líder o dueño (A) de la tarea.
+- Selecciona la nueva fecha y presiona "Guardar due date". Se registra en el historial y se notifica al dueño.
+
+#### Cambiar estado
+- Disponible si tienes permiso `task_change_status` Y eres ejecutor (R) o líder.
+- **Flujo de estados:** todo → doing → (awaiting_approval o done) → done
+- Si pones **blocked**: debes indicar el motivo y quién debe resolver el bloqueo. Esa persona recibe notificación.
+- Si la tarea **requiere aprobación** y intentas marcarla como `done`: automáticamente pasa a `awaiting_approval` y se crea una solicitud de aprobación para el dueño (A).
+- Si hay **dependencias pendientes**: no se puede avanzar a doing/done, se fuerza a blocked.
+- Si el **WIP** está lleno: no se puede mover a doing hasta liberar una tarea.
+
+#### Aprobaciones
+- Si la tarea está en `awaiting_approval`, el dueño (A) ve los botones **Aprobar** y **Rechazar**.
+  - **Aprobar:** Cierra la tarea (estado `done`) y notifica a los ejecutores.
+  - **Rechazar:** Devuelve la tarea a `doing` para correcciones.
+- Puede agregar una **nota de decisión** explicando el motivo.
+
+#### Avances / notas (Comentarios)
+- Cualquier participante puede agregar comentarios de avance con:
+  - Texto libre
+  - Porcentaje de progreso (0-100%)
+  - Próximo paso
+- Los últimos 15 comentarios se muestran en orden inverso.
+- El dueño (A) recibe notificación de cada nuevo avance.
+
+#### Archivos adjuntos
+- Si tienes permiso `task_upload_files`, puedes subir archivos al Storage de Supabase.
+- Cada archivo queda asociado a la tarea con quien lo subió y la fecha.
+- Se generan URLs firmadas (válidas 1 hora) para descargar directamente.
+
+#### Editar responsabilidades (RACI)
+- Si tienes permiso `task_change_raci`, puedes reasignar los roles A/R/C/I de la tarea.
+- Al guardar, se notifica a todas las personas afectadas.
+
+#### Dependencias de la tarea
+- Al crear la tarea se pueden definir dependencias.
+- Las dependencias bloqueantes aparecen destacadas con el nombre del dueño (A) y ejecutores (R) de cada tarea pendiente.
+""")
+
+    with st.expander("📋 Plantillas", expanded=False):
+        st.markdown("""
+### ¿Para qué sirven las plantillas?
+Permiten definir estructuras de proyecto reutilizables: un conjunto de tareas con sus criterios, prioridades y tiempos relativos. Útil para proyectos repetitivos (onboarding, cierre de mes, auditorías, etc.).
+
+### Requiere permiso
+`template_manage` — Por defecto solo líderes.
+
+### Crear una plantilla
+1. Despliega **➕ Crear plantilla**.
+2. Ingresa nombre y descripción.
+3. Presiona **Crear**.
+
+### Agregar tareas a la plantilla
+1. Selecciona la plantilla en el selector.
+2. En "Agregar tarea a plantilla", completa:
+   - **Título** y **DoD** (ambos obligatorios)
+   - Descripción, Prioridad, si Requiere aprobación
+   - **Días desde inicio:** Cuántos días después del arranque del proyecto se espera que esta tarea tenga su target/due.
+   - **Tags** (separados por coma) y **Componente** (opcional)
+3. Presiona **Agregar a plantilla**.
+
+### Aplicar plantilla a un proyecto
+1. Selecciona la plantilla y el **proyecto destino**.
+2. Ingresa la **fecha de inicio base** del proyecto.
+3. Presiona **Aplicar**. El sistema crea todas las tareas con fechas calculadas automáticamente a partir de la fecha base.
+4. Después debes asignar responsabilidades (RACI) a cada tarea creada desde el detalle o tablero.
+""")
+
+    with st.expander("📤 Exportar datos", expanded=False):
+        st.markdown("""
+### ¿Qué se puede exportar?
+Requiere permiso `export_data`.
+
+#### CSV
+- Todas las tareas del proyecto seleccionado en formato CSV.
+- Compatible con Excel, Google Sheets, etc.
+
+#### Excel (.xlsx)
+- Mismas tareas en formato Excel con hoja "Tareas".
+- Las fechas se convierten a texto legible para evitar errores de compatibilidad.
+
+#### ICS (calendario)
+- Archivo de eventos de calendario estándar.
+- Cada tarea se convierte en un evento de día completo con su due_date.
+- Compatible con **Google Calendar**, **Outlook**, **Apple Calendar**, etc.
+- La descripción del evento incluye el DoD de la tarea.
+
+### Cómo importar el ICS a Google Calendar
+1. Descarga el archivo `.ics`.
+2. En Google Calendar: Ajustes → Importar → selecciona el archivo.
+3. Las tareas aparecerán como eventos en sus fechas de vencimiento.
+""")
+
+    with st.expander("⚖️ Gobernanza", expanded=False):
+        st.markdown("""
+### Solo para Líderes
+La sección de Gobernanza controla qué puede hacer cada rol en el grupo.
+
+### Permisos disponibles
+| Acción | Descripción |
+|---|---|
+| `task_create` | Crear nuevas tareas |
+| `task_change_status` | Cambiar estado de tareas |
+| `task_change_due_date` | Modificar fecha de vencimiento |
+| `task_change_raci` | Editar responsabilidades RACI |
+| `task_upload_files` | Subir archivos a tareas |
+| `project_create` | Crear proyectos |
+| `project_edit` | Editar proyectos y miembros |
+| `group_transfer_lead` | Transferir liderazgo del grupo |
+| `group_manage_members` | Gestionar miembros y ver código del grupo |
+| `template_manage` | Crear y aplicar plantillas |
+| `export_data` | Exportar datos en CSV/Excel/ICS |
+
+### Editar permisos
+1. Selecciona la **acción** a modificar.
+2. Selecciona el **rol** (líder o miembro).
+3. Marca o desmarca **Permitido**.
+4. Presiona **Guardar permiso**.
+
+> ⚠️ Cambiar permisos afecta inmediatamente a todos los usuarios del grupo con ese rol.
+
+### Reglas de gobernanza recomendadas
+- Toda tarea debe tener DoD antes de cerrarse.
+- Si requiere aprobación, el dueño (A) es el único que puede decidir.
+- Las tareas bloqueadas deben tener motivo y responsable de desbloqueo.
+- Limitar WIP evita la multitarea y mejora el throughput del equipo.
+""")
+
+    with st.expander("📈 Reportes", expanded=False):
+        st.markdown("""
+### Reporte semanal
+Genera un reporte de la semana seleccionada con dos tablas:
+
+#### ✅ Completadas
+Tareas cerradas (estado `done`) cuya fecha de completado cae dentro de la semana seleccionada.
+Columnas incluidas:
+- Título, proyecto, estado, prioridad, fechas
+- **Ejecutores (R)** y **Dueño (A)** (enriquecidos desde roles)
+- **Días de ciclo** (lead_days): días desde creación hasta cierre
+- **Horas de aprobación**: tiempo que tardó el ciclo de aprobación
+
+#### ⏳ Pendientes
+Tareas que siguen abiertas (todo/doing/blocked/awaiting_approval) al momento de generar el reporte.
+Mismas columnas + estado actual.
+
+### Filtros
+- **Proyecto:** Filtra por proyecto específico o muestra todos.
+- **Semana de referencia:** Cambia el picker de fecha para ver semanas anteriores o futuras.
+
+### Exportar a Excel
+- Descarga el reporte con dos hojas: "Completadas" y "Pendientes".
+- Útil para presentaciones de gestión o archivos históricos.
+""")
+
+    with st.expander("🔔 Notificaciones", expanded=False):
+        st.markdown("""
+### ¿Cuándo recibes notificaciones?
+El sistema genera notificaciones automáticas en estos eventos:
+
+| Evento | Quién recibe |
+|---|---|
+| Se crea una tarea | Dueño (A) y todos los Ejecutores (R) |
+| Te consultan en una tarea | Los Consultados (C) |
+| Hay una novedad de la que debes estar al tanto | Los Informados (I) |
+| Se cambia la fecha de vencimiento | El Dueño (A) |
+| Se cambia el estado de una tarea | El Dueño (A) |
+| Tarea bloqueada | El responsable de desbloqueo |
+| Solicitud de aprobación | El Dueño (A) |
+| Tarea aprobada/rechazada | Los Ejecutores (R) |
+| Tarea en blocked o done | Los Informados (I) |
+| Nuevo comentario/avance | El Dueño (A) |
+| Archivo subido | El Dueño (A) |
+| Se actualizan los roles RACI | Todos los nuevos asignados |
+
+### Cómo ver tus notificaciones
+- En el **panel izquierdo**, presiona el botón **🔔 Notificaciones (N sin leer)**.
+- Se despliega la lista de las últimas 20 notificaciones con ícono 📬 (no leída) o 📭 (leída).
+- Presiona **"Marcar todas como leídas"** para limpiar el contador.
+- El número de no leídas también aparece en el encabezado principal de la app.
+
+### Notificaciones por correo (opcional)
+- Al crear tareas o cambiar estados, hay un checkbox "Enviar correo" para enqueue notificaciones por email.
+- Requiere que los usuarios tengan email en su perfil y que el sistema de envío (outbound_queue) esté activo.
+""")
+
+    with st.expander("🛡️ Admin Global", expanded=False):
+        st.markdown("""
+### ¿Quién tiene acceso?
+Solo usuarios con el campo `is_global_admin = true` en su perfil de Supabase.
+El menú "Admin" solo aparece si eres administrador global.
+
+### ¿Qué puedes hacer?
+- **Ver todos los grupos** del sistema con sus metadatos.
+- **Ver miembros** de cualquier grupo con sus roles, nombres y emails.
+- **Ver proyectos** de cualquier grupo.
+- **Ver tareas** de cualquier proyecto (últimas 500).
+
+> Este panel es de solo lectura para auditoría. Los cambios se hacen desde las secciones correspondientes.
+""")
+
+    # ─── PREGUNTAS FRECUENTES ─────────────────────────────────────────────────
+    st.divider()
+    st.markdown("## ❓ Preguntas Frecuentes (FAQ)")
+
+    faqs = [
+        ("¿Por qué no puedo cambiar el estado de una tarea?",
+         "Para cambiar estado necesitas (a) permiso `task_change_status` en el grupo, Y (b) ser Ejecutor (R) de la tarea o Líder del grupo. Si eres Dueño (A) pero no Ejecutor, no puedes cambiar el estado directamente. El flujo esperado es que el Ejecutor mueva la tarea a `awaiting_approval` y el Dueño la apruebe."),
+        ("¿Por qué la tarea se pone automáticamente en 'blocked' cuando intento avanzarla?",
+         "La tarea tiene dependencias pendientes (otras tareas que deben completarse primero). Revisa la sección 'Dependencias' en el detalle de la tarea para ver cuáles son y quién las tiene asignadas."),
+        ("¿Qué pasa si intento mover una tarea a 'En curso' pero está el WIP lleno?",
+         "El sistema te mostrará un mensaje de error indicando cuántas tareas tienes en curso y cuál es el límite del proyecto. Debes completar o reasignar una tarea en curso antes de tomar otra."),
+        ("¿Cómo cierro una tarea que no requiere aprobación?",
+         "Cambia el estado directamente a `done` en la sección 'Acciones' del detalle de la tarea. Si no requiere aprobación, se cierra inmediatamente y se registra la fecha de completado."),
+        ("¿Cómo cierro una tarea que sí requiere aprobación?",
+         "Como Ejecutor (R), cambia el estado a `done`. El sistema lo intercepta y lo pone en `awaiting_approval` automáticamente, notificando al Dueño (A). El Dueño debe ir al detalle de la tarea y presionar 'Aprobar'."),
+        ("¿Puedo asignarme como Dueño (A) y Ejecutor (R) al mismo tiempo?",
+         "Sí, técnicamente es posible. Sin embargo, va en contra del principio RACI donde A y R deben ser personas distintas para garantizar control. Se recomienda que sean roles diferentes."),
+        ("¿Cómo comparto el acceso al grupo con mi equipo?",
+         "El código de acceso del grupo es visible en el panel izquierdo bajo '🔑 Código de acceso'. Compártelo con tu equipo. Ellos deben ir a '🔑 Unirme a un grupo' e ingresar ese código."),
+        ("¿Puedo pertenecer a varios grupos al mismo tiempo?",
+         "Sí. Puedes unirte a tantos grupos como quieras. Usa el selector de grupo en el panel izquierdo para cambiar entre ellos. El contenido de la app (proyectos, tareas, KPIs) cambia según el grupo activo."),
+        ("¿Qué significa 'Antigüedad' en la tarjeta de tarea?",
+         "Es la cantidad de días desde que se creó la tarea hasta hoy. Una antigüedad muy alta en tareas abiertas puede indicar estancamiento o falta de atención."),
+        ("¿Por qué no veo el botón de 'Aprobar' en una tarea en aprobación?",
+         "Solo el Dueño (A) específico de esa tarea puede ver y usar los botones de aprobación. Si no eres el A asignado, verás el mensaje 'Solo el dueño (A) puede decidir'."),
+        ("¿Cómo funciona el reporte semanal?",
+         "Muestra las tareas completadas (closed) durante la semana que selecciones, y las tareas que siguen pendientes. La semana va de lunes a domingo. Cambia el picker de fecha para ver semanas anteriores."),
+        ("¿Por qué no puedo exportar datos?",
+         "Necesitas el permiso `export_data`. Pide a tu líder de grupo que te lo asigne en la pestaña de Gobernanza."),
+        ("¿Cómo agrego tags a las tareas?",
+         "Al crear o editar una tarea en el Tablero, hay un selector de tags. Los tags se crean automáticamente si no existen en el grupo. También puedes filtrar el tablero por tags."),
+        ("¿Los archivos adjuntos son privados?",
+         "Los archivos se guardan en el Storage de Supabase del grupo. Las URLs de descarga son firmadas y expiran en 1 hora. Cualquier persona con acceso a la tarea puede ver la lista de archivos y descargarlos."),
+        ("¿Qué pasa si rechazo una aprobación?",
+         "La tarea vuelve a estado `doing` para que el Ejecutor pueda corregir. El rechazo se registra en el historial con la nota de decisión."),
+        ("¿Cómo veo quién bloqueó una tarea y por qué?",
+         "En el detalle de la tarea, el motivo de bloqueo (`blocked_reason`) aparece en la descripción de estado. El historial de cambios (tabla `task_history`) registra todos los cambios."),
+        ("¿Puedo usar plantillas en proyectos que ya tienen tareas?",
+         "Sí. Las plantillas agregan nuevas tareas al proyecto sin borrar las existentes. Ten en cuenta que necesitarás asignar RACI a cada tarea creada desde la plantilla."),
+        ("¿El sistema envía correos automáticamente?",
+         "El envío de correos es opcional y debe activarse explícitamente con el checkbox 'Enviar correo' al crear tareas o cambiar estados. El sistema encola el email en `outbound_queue`; el envío real depende de que tengas un servicio de email configurado externamente."),
+    ]
+
+    for q, a in faqs:
+        with st.expander(f"❓ {q}"):
+            st.markdown(a)
 
 
 # =============================================================================
